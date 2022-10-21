@@ -1,0 +1,280 @@
+---
+title: "cell_line_experiment"
+author: "Haris Babačić"
+date: "25/05/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+library(readxl)
+library(ggplot2)
+library(ggrepel)
+library(stringr)
+library(seqinr)
+
+# Don't forget to change the working directory 
+setwd("code_submission/data")
+files = list.files()
+
+df2 = read_delim("genes_table_inf_cells.txt")
+df = df2[, grep("X__POOL", colnames(df2))]
+colnames(df)
+colnames(df) = gsub("X__POOL_", "", colnames(df))
+colnames(df) = gsub("_set.+", "", colnames(df))
+
+df = as.data.frame(apply(df, 2, as.numeric))
+#rownames(df) = df2$`Protein ID` # For protein tables
+rownames(df) = df2$`Gene Name`
+hist(as.matrix(df), breaks=100)
+boxplot(df)
+colnames(df)
+
+dfcell = na.omit(df)
+af = as.matrix(dfcell)
+rownames(af)
+table(duplicated(rownames(af)))
+
+```
+
+```{r functions, include=FALSE}
+### Function for differential expression
+difex = function (x, y, d, c) 
+{
+  trAFold <- rowMeans(d[, x]) - rowMeans(d[, y])
+  t.result <- apply(d, 1, function(i) t.test(i[x], i[y]))
+  p_values <- unlist(lapply(t.result, function(z) z$p.value))
+  adj.p_values <- p.adjust(p_values, method = "fdr")
+  results <- data.frame(Protein = rownames(d), gene_id = c$`Gene ID`[match(rownames(d), 
+    c$`Gene Name`)], description = c$Description[match(rownames(d), 
+    c$`Gene Name`)], gene_name = rownames(d), fc = trAFold, p.value = p_values, adj.p.value = adj.p_values, 
+    row.names = rownames(d))
+  results <- results[order(results$fc, decreasing = T), ]
+  results
+}
+
+### Function for volcano plots
+volc_plot = function(rest, shval, fcval, sign, name) {
+  rest$alteration = "Up in Covid-19"
+  rest$alteration[which(rest$fc<0)] = "Down in Covid-19"
+  
+  rest$shade = abs(rest$fc)*-log10(rest$adj.p)
+  rest$shadcat = cut(rest$shade, breaks=c(0,0.25, 0.5, 0.75, 1, 1.5, 2.5, 7))
+  levels(rest$shadcat) = c(1:7)
+  table(is.na(rest$shadcat))
+  table(rest$shadcat)
+  
+  y <- rest[which(rest$shade>2.5 & rest$fc>0),]
+  r <- rest[which(rest$shade>shval & rest$fc<fcval),] # change her depending on ho many you want to show to the left
+  
+  if(sign==T) {
+      scaled_y = scale_y_continuous("", breaks=seq(round(min(-log10(rest$adj.p.value), digits=2)),
+                                  round(max(-log10(rest$adj.p.value)), digits=2), 0.25)) 
+    } else {
+      scaled_y = scale_y_continuous("", breaks=seq(round(min(-log10(rest$adj.p.value), digits=1)),
+                                   -log10(0.05), 0.25))
+    }
+  
+  
+  cov = ggplot(rest, aes(x=fc, y=-log10(adj.p.value), col=alteration)) + 
+    geom_point(aes(alpha=as.numeric(shadcat))) + 
+    theme_classic() + 
+    ylab(expression(paste("-log10 ", italic("q"), " values"))) + 
+    xlab("log2 fold-change") + 
+    scale_alpha(range=c(0.1,1), guide="none") +
+    geom_hline(yintercept=-log10(0.05), col="red", linetype="dotdash", size=1) + 
+    scale_color_manual("Alteration", values=c("#0072B2", "#D55E00")) +
+    theme(legend.position = "none") +
+    geom_text_repel(data=y, aes(x=fc, y=-log10(adj.p.value), label=gene_name), col="#D55E00", vjust=0.5, hjust=0.1) + 
+    geom_text_repel(data=r, aes(x=fc, y=-log10(adj.p.value), label=gene_name), col="#0072B2", vjust=0.5, hjust=-0.1) + 
+    scale_x_continuous("", breaks=seq(round(min(rest$fc)),round(max(rest$fc)), 0.5)) +
+    scaled_y
+  cov
+  
+  ggsave(paste(name, ".png", sep=""), cov, width=8, height=7, units="in", dpi=600)
+  ggsave(paste(name, ".pdf", sep=""), cov, width=8, height=7, units="in", dpi=600)
+  
+}
+
+```
+
+Differential expression at different days
+```{r difex, include=FALSE}
+setwd("../results")
+
+#### For 3 days
+x = grep("wt_3D", colnames(af))
+y = grep("uninf_3D", colnames(af))
+
+res3 = difex(x, y, af, df2)
+ress3 = res3[which(res3$adj.p.value<0.05),]
+volc_plot(res3, 1, 0, T, "volcano_inf_exp_3_day")
+
+#### For 7 days
+x = grep("wt_7D", colnames(af))
+y = grep("uninf_7D", colnames(af))
+
+res7 = difex(x, y, af, df2)
+ress7 = res7[which(res7$adj.p.value<0.05),]
+volc_plot(res7, 1, 0, T, "volcano_inf_exp_7_day")
+
+#### For 3 hours
+x = grep("wt_3h", colnames(af))
+y = grep("uninf_3h", colnames(af))
+
+res3h = difex(x, y, af, df2)
+ress3h = res3h[which(res3h$adj.p.value<0.05),]
+volc_plot(res3h, 1, 0, F, "volcano_inf_exp_3_hours")
+
+#### For 1 days
+x = grep("wt_1D", colnames(af))
+y = grep("uninf_1D", colnames(af))
+
+res1d = difex(x, y, af, df2)
+ress1d = res1d[which(res1d$adj.p.value<0.05),]
+volc_plot(res1d, 1, 0, F, "volcano_inf_exp_1_day")
+
+```
+
+Comparing differentially altered proteins in cell lines to those in serum
+```{r comparison_serum, include=FALSE}
+
+### Comparison to the differentialy altered proteins in serum
+tres = read.csv("covid_vs_hc_all_res.csv")
+pls = tres[which(tres$adj.p<0.05),]
+pls$cell_fc = ress3$fc[match(pls$gene, ress3$gene_name)] # Change here for  the day of interest
+
+pls$cat = NA
+pls$cat[which(pls$fc>0 & pls$cell_fc>0)] = paste('\U2191', "Plasma,", '\U2191', "Infected cells")
+pls$cat[which(pls$fc>0 & pls$cell_fc<0)] = paste('\U2191', "Plasma,", '\U2193', "Infected cells")
+pls$cat[which(pls$fc<0 & pls$cell_fc<0)] = paste('\U2193', "Plasma,", '\U2193', "Infected cells")
+pls$cat[which(pls$fc<0 & pls$cell_fc>0)] = paste('\U2193', "Plasma,", '\U2191', "Infected cells")
+
+pls2 = pls[-which(is.na(pls$cat)),]
+
+# # For the overlap - 7 days
+# det_7 = pls2$gene
+# dets_7 = pls2$gene[c(which(pls2$cat=="↑ Plasma, ↑ Infected cells"), which(pls2$cat=="↓ Plasma, ↓ Infected cells"))]
+# 
+# # For the overlap - 3 days
+# det_3 = pls2$gene
+# dets_3 = pls2$gene[c(which(pls2$cat=="↑ Plasma, ↑ Infected cells"), which(pls2$cat=="↓ Plasma, ↓ Infected cells"))]
+
+#pls2 = pls2[which(pls2$gene %in% intersect(dets_3, dets_7)),]
+
+t = table(pls2$cat)
+a = sum(t[c(1,4)])/sum(t)*100
+
+cv = cor(pls2$fc, pls2$cell_fc, use="pairwise.complete.obs", method="spearman")
+cv
+
+p = ggplot(pls2, aes(fc, cell_fc, col=cat)) +
+  geom_point() +
+  geom_text_repel(label=pls2$gene) + 
+  theme_classic() +
+  geom_vline(xintercept = 0, col="darkgray", linetype="dashed", size=0.5) +
+  geom_hline(yintercept = 0, col="darkgray", linetype="dashed", size=0.5) +
+  scale_x_continuous("log2-FC Plasma, COVID-19:Healthy", breaks=seq(-2,2,0.25)) +
+  scale_y_continuous("log2-FC Cell line, AV-infected:Controls", breaks=seq(-2,2,0.25)) +
+  annotate("text", x=-1.5, y=1.3, hjust=0, col="black",
+           label=paste("Agreement: ", round(a, digits=3), "%", sep="")) +
+  annotate("text", x=-1.5, y=1.1, hjust=0, col="black",
+           label=paste("r = ", round(cv, digits=3), sep="")) +
+  scale_color_manual(name="change", values=c("#D55E00", "#E69F00", "#CC79A7", "#009E73")) +
+  theme(legend.position = c(0.2, 0.9))
+p
+
+quartz(type = 'pdf', file = 'Plasma_vs_Cell_line_WT_Day_3.pdf', width=6, height=5) # Change name based on the day 
+p
+dev.off()
+ggsave("Plasma_vs_Cell_line_Day_3.jpeg", p, dpi=600, width=8, height=8)
+
+```
+
+Boxplots per protein of interest
+```{r boxplots_per_protein, include=FALSE}
+library(ggpubr)
+
+# Load the analysed proteins
+dfaf = read.csv("analysed_protein_matrix.csv", row.names = 1)
+
+#For all of them
+#pls$gene[which(pls$gene %in% unique(c(ress3$gene_name, ress7$gene_name)))]
+selected = c("ISG15", "MX1", "PSMB8")
+
+for (i in selected) {
+  gr = c("uninf_3D", "wt_UV_3D", "wt_3D", "wt_7D")
+  gr2 = c("COV", "HC")
+  
+  sel = c(grep("uninf_3h", colnames(af)), grep("wt_UV_3h", colnames(af)), grep("wt_3h", colnames(af)),
+        grep("uninf_1D", colnames(af)), grep("wt_UV_1D", colnames(af)), grep("wt_1D", colnames(af)),
+        grep("uninf_3D", colnames(af)), grep("wt_UV_3D", colnames(af)), grep("wt_3D", colnames(af)),
+        grep("uninf_7D", colnames(af)), grep("wt_UV_7D", colnames(af)), grep("wt_7D", colnames(af)))
+  vals = af[i, sel]
+  
+  cats = c(rep("uninf_3h", 3), rep("wt_UV_3h", 3), rep("wt_3h", 3),
+        rep("uninf_1D", 3), rep("wt_UV_1D", 3), rep("wt_1D", 3),
+        rep("uninf_3D", 3), rep("wt_UV_3D", 3), rep("wt_3D", 3),
+        rep("uninf_7D", 3), rep("wt_UV_7D", 3), rep("wt_7D", 3))
+  bc = as.data.frame(cbind(vals, cats))
+  bc$vals = as.numeric(bc$vals)
+  
+  mycomparisons = list(c("wt_3h", "wt_UV_3h"), c("wt_3h", "uninf_3h"),
+                     c("wt_1D", "wt_UV_1D"), c("wt_1D", "uninf_1D"),
+                     c("wt_3D", "wt_UV_3D"), c("wt_3D", "uninf_3D"),
+                     c("wt_7D", "wt_UV_7D"), c("wt_7D", "uninf_7D"),
+                     c("wt_3h", "wt_1D"),
+                     c("wt_1D", "wt_3D"),
+                     c("wt_3D", "wt_7D"))
+  
+  cols = rep(c("black",  "#009E73", "#D55E00"), 4)
+  
+  bc$Condition = factor(gsub("_[0-9].+", "", bc$cats), levels=c("uninf", "wt_UV", "wt"))
+  levels(bc$Condition) = c("Uninfected", "UV Mock", "SARS-CoV-2")
+  
+  p1 = ggboxplot(bc, x="cats", y="vals", color="Condition",
+          add="jitter", palette=cols, size=0.25) +
+  stat_compare_means(comparisons = mycomparisons, 
+                     label = "p.signif", method="t.test",
+                     label.y=c(max(bc$vals[grep("3h", bc$cats)])+0.4,
+                               max(bc$vals[grep("3h", bc$cats)])+0.1,
+                               max(bc$vals[grep("1D", bc$cats)])+0.4,
+                               max(bc$vals[grep("1D", bc$cats)])+0.1,
+                               max(bc$vals[grep("3D", bc$cats)])+0.4,
+                               max(bc$vals[grep("3D", bc$cats)])+0.1,
+                               max(bc$vals[grep("7D", bc$cats)])+0.4,
+                               max(bc$vals[grep("7D", bc$cats)])+0.1)) +
+  scale_x_discrete("Group", breaks=c("wt_UV_3h", "wt_UV_1D", "wt_UV_3D", "wt_UV_7D"), 
+                   labels=c("3 hours", "1 day", "3 days", "7 days")) +
+  scale_y_continuous("log2 relative expression values (ratios)") +
+  geom_vline(xintercept = c(3.5, 6.5, 9.5), linetype="dashed", color="#999999") + 
+  theme(legend.position="none")
+  #p1
+  
+  a = gsub("X[0-9]+|[0-9]+", "", names(dfaf[i,]))
+  bp = as.data.frame(cbind(as.numeric(dfaf[i,]), a))
+  
+  bp$V1 = as.numeric(bp$V1)
+  bp$V2 = factor(bp$a, levels=c("HC", "COVID"))
+  levels(bp$V2) = c("Healthy", "COVID-19")
+  
+  p2 = ggboxplot(bp, x="V2", y="V1", color="V2",
+          add="jitter", palette = cols[-1]) +
+  stat_compare_means(method="t.test", label = "p.signif") +
+  xlab("Group") +
+  scale_y_continuous("log2 relative expression values (ratios)") +
+  theme(legend.position="none")
+  #p2
+  
+  pp = plot_grid(p1, p2,
+          rel_widths = c(2,1))
+  pp
+  
+  ggsave(paste("gene_", i, "_cell_plasma_plot.pdf", sep=""), pp, dpi=300, width=7, height=3.5)
+  print(paste("Run", which(selected==i), ": Protein", i, "done."))
+}
+
+```
+
+
