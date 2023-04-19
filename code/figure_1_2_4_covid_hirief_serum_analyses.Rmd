@@ -9,23 +9,23 @@ editor_options:
 
 Run this chunk to add libraries and datasets
 ```{r setup, include=FALSE}
-pack <- c("tidyverse", "ggplot2", "matrixStats", "VennDiagram", "ggrepel", "dplyr", "factoextra", "FactoMineR", "ggfortify", "cluster", "gplots", "RColorBrewer", "ComplexHeatmap", "readxl", "ggpubr", "msigdbr", "grid", "limma")
+pack <- c("tidyverse", "ggplot2", "matrixStats", "VennDiagram", "ggrepel", "dplyr", "factoextra", "FactoMineR", "ggfortify", "cluster", "gplots", "RColorBrewer", "ComplexHeatmap", "readxl", "ggpubr", "msigdbr", "grid", "limma", "circlize",
+          "org.Hs.eg.db", "clusterProfiler", "enrichplot", "WGCNA")
 lapply(pack, require, character.only = TRUE)
-#library(butterfly)
 source("https://gist.githubusercontent.com/jokergoo/bfb115200df256eeacb7af302d4e508e/raw/14f315c7418f3458d932ad749850fd515dec413b/word_cloud_grob.R")
 
 # Change the working directory to correspond to the location of the folder
-setwd("code_submission/data")
+setwd("code_resubmission/data")
 
-meta = read_excel("covid19_klin_parametrar_all.xlsx") # This clinical dataset is not available due to legal constrains.
-cd = read_excel("clin.xlsx", sheet=1) # This clinical dataset is not available due to legal constrains.
-c = read_excel("covid19_klin_parametrar_all.xlsx", sheet=2) # This clinical dataset is not available due to legal constrains.
-data = read.delim("genes_table_serum.txt", header=T)
+data = read.delim("genes_table_serum.txt", header=T) # To analyse the data in a gene-centric manner
+# If you want to get the SARS-CoV-2 proteins, you need to use the protein-centric table below
+# data = read.delim("proteins_table_serum", header=T) # To analyse the data in a protein-centric manner
 colnames(data)
+# Clinical data are not available due to legal constraints
 
 # Select the variables of interest
 sel = c(15:46)
-###If running the protein tables search with the SARS-CoV-2 peptides
+### To run the protein tables search with the SARS-CoV-2 peptides deselect the lines with # below
 #grep("_tmt16plex_", colnames(data))  
 df = as.matrix(data[,sel])
 rownames(df) = data$Gene.Name
@@ -38,16 +38,13 @@ rem = grep("IS", colnames(df))
 df = df[, -rem]
 
 # Add the COVID to the label IDs, to fit the clinical dataset
-cd$`Patient ID` = gsub("[*]", "", cd$`Patient ID`)
 colnames(df)[-grep("HC", colnames(df))] = paste("COVID", colnames(df)[-grep("HC", colnames(df))], sep="")
-c$ID[-grep("HC", c$ID)] = paste("COVID", c$ID[-grep("HC", c$ID)], sep="")
 # Save the dataset
 write.csv(df, "data_matrix.csv")
 
 # Load the Filbin and SOMAscan data
 pea = read_xlsx("filbin_cell_reports_medicine_2021_table_s3.xlsx", sheet=3)
 length(intersect(pea$Assay, data$Gene.Name))
-
 soma = read.csv("sullivan_cell_reports_2021_somascan_summary.csv")
 soma$gene = gsub("[.].+", "", soma$Analyte)
 length(intersect(soma$gene, data$Gene.Name))
@@ -60,32 +57,36 @@ tisscat = read_tsv("hpa/tissue_category_rna_any_Tissue.tsv")
 
 ```
 
+```{r create_functions, include=FALSE, echo=FALSE}
+```
+
+
 Comparison COVID-19 to PCR-negative controls
 ```{r differential_expression, include=FALSE, echo=FALSE}
+# Change the directory to the results folder
 setwd("../results")
 
-hc = grep("HC", colnames(df))
-
+# Check the distribution of the data
 hist(df, breaks=100)
 boxplot(df)
 
+# Calculate the missing values in percentages
 miss = apply(df, 1, function(x) length(which(is.na(x)))/length(x)*100)
 names(miss) = data$Gene.Name
 table(miss<50)
+
+# Select all the proteins with 50% observations in the data
 sel = names(miss[which(miss<50)])
+dfaf = df[sel,]
 
-dfa = na.omit(df)
+##### Perform unpaired t test comparing COVID-19 patients and healthy controls
+# Select the COVID-19 cases
+cov = grep("COVID", colnames(dfaf))
+# Select the healthy controls
+hc = grep("HC", colnames(dfaf))
 
-d = as.data.frame(t(dfa))
-d$type = "HC"
-d$type[grep("COV", rownames(d))] = "COVID19"
-pca = pca_km_plot(d, type, 3, "COVID19 vs Healthy", c(21:23), scale=F) + theme_classic()
-pca
-ggsave("pca_covid.jpeg", pca, dpi=300, width=4, height=3)
-
-# Select all with 50% observations 
-dfa = df[sel,]
-t_res = apply(dfa, 1, function(x) t.test(x[-hc], x[hc]))
+# Perform unpaired two-sided t test
+t_res = apply(dfaf, 1, function(x) t.test(x[cov], x[hc]))
 tres = data.frame(matrix(unlist(t_res), nrow=length(t_res), byrow=T))
 tres[,1:9] = apply(tres[,1:9], 2, as.numeric)
 colnames(tres) <- c("statistic", "df", "p.value", "conf_int_lower", "conf_int_upper", "estimate_mean_x", "estimate_mean_y", "null.value", "stderr", "side", "method", "data.name")
@@ -93,16 +94,14 @@ colnames(tres) <- c("statistic", "df", "p.value", "conf_int_lower", "conf_int_up
 tres$gene = names(t_res)
 tres$protein = data$Protein.ID.s.[match(tres$gene, data$Gene.Name)]
 tres$adj.p = p.adjust(tres$p.value, method="fdr")
+tres$fc = rowMeans(dfaf[,cov], na.rm=T)-rowMeans(dfaf[,hc], na.rm=T)
 
-tres$fc = rowMeans(dfa[,-hc], na.rm=T)-rowMeans(dfa[,hc], na.rm=T)
-
-dfaf = dfa
-
+# Check the distribution of p and q values 
 hist(tres$p.value, breaks=100)
 hist(tres$adj.p, breaks=100)
 
+# Subset the differentially altered proteins (DAPs) at 5% FDR and save the results
 diffall = tres[which(tres$adj.p<0.05),]
-
 write.csv(tres, "covid_vs_hc_all_res.csv")
 write.csv(diffall, "covid_vs_hc_difall.csv")
 
@@ -128,7 +127,7 @@ cov = ggplot(tres, aes(x=fc, y=-log10(adj.p), col=alteration)) +
     ylab(expression(paste("-log10 ", italic("q"), " values"))) + 
     xlab("log2 fold-change") + 
     scale_alpha(range=c(0.1,1), guide="none") +
-    geom_hline(yintercept=-log10(0.05), col="red", linetype="dotdash", size=1) + 
+    geom_hline(yintercept=-log10(0.05), col="red", linetype="dotdash", linewidth=1) + 
     scale_color_manual("Alteration", values=c("#0072B2", "#D55E00")) +
     theme(legend.position = c(0.9, 0.1)) +
     geom_text_repel(data=y, aes(x=fc, y=-log10(adj.p), label=gene), col="#D55E00", vjust=0.5, hjust=0.1) + 
@@ -146,37 +145,9 @@ dev.off()
 
 ```
 
-Clean the clinical data 
-- This chunk will give errors because the clinical dataset is not available due to legal constraints.
-```{r clinical_data_clean, include=FALSE, echo=FALSE}
-##### Clean clinical variables #####
-str(cd)
-
-cd$`O2 max liters/minute`[19] = 15
-cd$`IgG against whole SARS-CoV-2 (titer) immunofluorescence`[which(cd$`IgG against whole SARS-CoV-2 (titer) immunofluorescence`=="<20")] = 20
-cd$`Neutralizing antibodies (titers)`[which(cd$`Neutralizing antibodies (titers)`=="<10")] = 10
-cd$`troponin T`[which(cd$`troponin T`=="<5")] = 5
-cd$Basophils[which(cd$Basophils=="<0.1")] = 0.1
-
-cd = as.data.frame(cd)
-sel = c(3, 9, 11, 14:42)
-
-cd[,sel] = apply(cd[,sel], 2, as.numeric)
-
-cd$NLR = cd$Neutrophils/cd$Lymphocytes
-
-summary(cd$Age[grep("COV", cd$`Patient ID`)])
-sd(cd$Age[grep("COV", cd$`Patient ID`)])
-table(cd$Sex[grep("COV", cd$`Patient ID`)])
-
-summary(cd$Age[grep("HC", cd$`Patient ID`)])
-sd(cd$Age[grep("HC", cd$`Patient ID`)])
-table(cd$Sex[grep("HC", cd$`Patient ID`)])
-
-```
-
 Adjust the comparison COVID-19 vs HC for clinical variables that have enough events
 - This chunk will give errors because the clinical dataset is not available due to legal constraints.
+- We provide the code used for the analysis
 ```{r limma_model, include=FALSE, echo=FALSE}
 ### Limma
 x = as.data.frame(t(dfaf))
@@ -338,7 +309,6 @@ autoplot(pam(all[,-which(colnames(all)=="type")], 3), data=all,
   theme(legend.position = c(0.9,0.9))
 dev.off()
 
-library(circlize)
 v = summary(as.numeric(dfa))
 colup = "#E69F00"
 coldown = "#0072B2"
@@ -357,8 +327,6 @@ dev.off()
 Make a complete heatmap with annotations for differentially altered proteins
 - This chunk will give errors because the clinical dataset is not available due to legal constraints.
 ```{r heatmap_differential_expression, include=FALSE, echo=FALSE}
-library(circlize)
-library(RColorBrewer)
 
 a = all[,which(colnames(all) %in% diffall$gene)]
 #colnames(a) = diffall$gene[match(colnames(a), diffall$protein)] #### For protein table
@@ -507,7 +475,8 @@ hm = Heatmap(a,
         row_split = 3,
         border = T,
         col = col_fun,
-        top_annotation = ha)
+        #top_annotation = ha # The heatmap can be obtained without the clinical information
+        )
 
 ht = draw(hm)
 genes_down = rownames(a)[row_order(ht)[[1]]]
@@ -515,7 +484,7 @@ genes_up_1 = rownames(a)[row_order(ht)[[2]]]
 genes_up_2 = rownames(a)[row_order(ht)[[3]]]
 
 theme_set(theme_bw(base_size=6))
-pdf("heatmap_differentially_expressed_in_covid.pdf", height=10, width=16)
+pdf("heatmap_differentially_expressed_in_covid_.pdf", height=10, width=16)
 draw(hm, heatmap_legend_side = "right", 
     annotation_legend_side = "right",
     padding = unit(c(0.5, 2.5, 0.5, 3.5), "cm"))
@@ -526,9 +495,6 @@ dev.off()
 Heatmap annotation based on different databases
 - This chunk will give errors because the clinical dataset is not available due to legal constraints.
 ```{r go_heatmap_annotation, include=FALSE, echo=FALSE}
-library(msigdbr)
-source("https://gist.githubusercontent.com/jokergoo/bfb115200df256eeacb7af302d4e508e/raw/14f315c7418f3458d932ad749850fd515dec413b/word_cloud_grob.R")
-library(grid)
 
 reactome <- msigdbr(species = "Homo sapiens", category = "C2", subcategory = "REACTOME") %>% 
   dplyr::select(gs_name, entrez_gene, gene_symbol)
@@ -567,7 +533,7 @@ ht2 = Heatmap(a, col = col_fun,
              show_row_dend = F, show_column_dend = T,
              row_split = cl, column_split = 4, 
              border = "#404040", row_title = NULL, column_title = NULL,
-             top_annotation = ha,
+             #top_annotation = ha, The heatmap can be obtained without clinical information
              row_gap = unit(0, "mm"), column_gap = unit(0, "mm"))
 
 align_to = split(seq_len(nrow(a)), cl)
@@ -627,12 +593,12 @@ Code for comparison to PEA and SOMAscan findings - exemplified with Olink
 ```{r olink_comparison, include=FALSE}
 # Filbin study
 ### The comments refer to changes required for the comparison to limma results
-ov = intersect(pea$Assay, tres$gene) # change to results_limma$gene
+# Change tres to results_limma$gene if you want to compare the agreement between PEA and limma results.
+ov = intersect(pea$Assay, tres$gene) 
 res = tres # Change to results_limma 
 res = res[which(res$adj.p<0.05),] # Change here based on the significance wanted
 
 res$olink = pea$`estimate (difference in expression given as COVID-positive minus COVID-negative)`[match(res$gene, pea$Assay)]
-
 pea$adj.pval = p.adjust(pea$p.value, method="fdr")
 # Change here based on significance
 oreSS = pea[which(pea$adj.pval<0.05),]
@@ -740,62 +706,62 @@ ggsave("corr_crp.pdf", corr_crp, width=4, height=3)
 
 Gene set enrichment analyses for the differentially-altered proteins
 ```{r enrichment, include=FALSE, echo=FALSE}
-library(org.Hs.eg.db)
-library(msigdbr)
-library(clusterProfiler)
-library(enrichplot)
-
+# Create a vector of proteins' log2-FC
 geneList <- tres$fc
 
-## feature 2: named vector
+## Assign protein names to the numeric vectors
 names(geneList) <- tres$gene
 
-## feature 3: decreasing order
+## Sort the proteins based on their log2-FC
 geneList <- sort(geneList, decreasing = TRUE)
 length(geneList)
 
+# Extract the proteins' ENTREZ IDs
 gene.df <- bitr(names(geneList), fromType = "SYMBOL",
         toType = c("ENSEMBL", "ENTREZID"),
         OrgDb = org.Hs.eg.db)
 head(gene.df)
 
+# Replace the gene names with their ENTREZ IDs
 geneList2 <- geneList
 names(geneList2) <- gene.df$ENTREZID[match(names(geneList2), gene.df$SYMBOL)]
 names(geneList2)
+
+# Remove duplicates that can give uncertainty in the ranking
 table(duplicated(names(geneList2)))
 geneList3 <- geneList2[-which(duplicated(names(geneList2))==TRUE)]
 
-# GSEA analysis
-# MSigDb analysis
+# Perform GSEA analysis
+# Specify the MSigDb dataset you need. Here you can specify the entire dataset with all genes
 m_df <- msigdbr(species = "Homo sapiens") %>% 
   dplyr::select(gs_name, entrez_gene, gene_symbol)
 head(m_df, 2) %>% as.data.frame
 
 # Selecting the chemical-genetic perturbations database
-# You can change here the category and subcategory of interest for the different analyses
+# You can change here the category and subcategory of interest for the different analyses, for e.g. C2 category and KEGG pathways
 m_t2g <- msigdbr(species = "Homo sapiens", category = "C2", subcategory = "KEGG") %>% 
   dplyr::select(gs_name, entrez_gene, gene_symbol)
 head(m_t2g)
 
-# Selecting gene sets on SARS or COVID
-covid = m_df[grep("SARS|COVID", m_df$gs_name),]
-length(table(covid$gs_name))
-
-# Replace the m_t2g with covid for the SARS and COVID datasets
+# This function will perform the GSEA
+set.seed(2635847) # You need to set seed to get the same results. The method's test is based on permutation
 em2 <- GSEA(geneList3, TERM2GENE = m_t2g, pvalueCutoff = 0.05) 
 head(em2)
 
+# Plot the top enriched pathways, annotating the identified proteins' location in the ranking 
 gsea_p = gseaplot2(em2, geneSetID = 1:5, subplots = 1:2,
                    color=c("#0072B2", "#D95F02", "#E69F00", "#CC79A7", "#009E73"))
-gsea_p
+print(gsea_p) + 
+  geom_vline(xintercept=(length(geneList3)/2), size=0.75, linetype=1)
+ggsave(paste("gsea_kegg_signatures.pdf", sep=""), dpi=300, width=8, height=6)
 
+# Select pathways that you want to plot with a ridgeplot
 # If you want to select based on NES quantiles (e.g. for too many hits in REACTOME analyses)
 # a = quantile(em2@result$NES, 0.9)
 # b = quantile(em2@result$NES, 0.1)
 # sel = c(which(em2@result$NES>a), which(em2@result$NES<b))
 
 pem = em2
-
 chos = em2@result$ID#[sel]
 ch = list()
 
@@ -811,26 +777,16 @@ r
 
 ggsave("ridgeplot_kegg.pdf", r, width = 8, height = 4, units = 'in', dpi=600)
 
+# Convert back ENREZ IDs to gene names and save the results
 em2 <- setReadable(em2, org.Hs.eg.db, keyType = "ENTREZID")
 # View(em2@result)
-
 write.csv(em2@result, "msigdb_gsea_differentially_expressed_in_covid_KEGG_sign_5%_fdr.csv")
-
-ggsave(paste("gsea_kegg_signatures.pdf", sep=""), gsea_p, dpi=300, width=8, height=6)
 
 ```
 
 Code for the protein-protein correlation network
 - The same code for the protein-protein correlation matrix has been used for correlating protein levels to variables from the clinical dataset. In that analysis we excluded the healthy controls. 
 ```{r protein_correlation_network, include=FALSE, echo=FALSE}
-library(ggnet)
-library(network)
-library(sna)
-library(RColorBrewer)
-library(ggnewscale)
-library(easypackages)
-library(WGCNA)
-library(cowplot)
 
 dfc = t(dfaf)
 cor_proteins = cor(dfc, dfc, method="spearman", use="pairwise.complete.obs")
@@ -880,76 +836,5 @@ write.csv(matrix_protein_corr_cat, paste("protein_protein_correlations_categoric
     filename, ".csv", sep = ""), quote = FALSE)
 write.csv(adjPvalue, paste("protein_protein_correlations_adj_p_", 
     filename, ".csv", sep = ""), quote = FALSE)
-
-##### Network plot #####
-# For all
-d = matrix_protein_corr#[sel,sel]
-d[which(matrix_protein_p_val>0.0499999)] = 0
-d = ifelse(d>0.8, 1, 0)
-table(d)
-
-a = apply(d, 1, function(x) sum(x, na.rm=T))
-hist(a, breaks=100)
-
-d = d[which(a>1), which(a>1)]
-#d[which(is.na(d))] = 0
-dim(d)
-
-net = as.network.matrix(d, directed=F)
-
-### Annotations for the cellular experiment
-### You can change these lines to annotate the proteins in the COVID-19 gene sets that are available in the dataframe "covid", 
-#   which we subsetted from the MSigDb database 
-
-cat = rep("A", nrow(d))
-
-### For day 3 of infection
-res = read.csv("../data/proteins_difexp_day_3.csv")
-res3 = res[which(res$adj.p.value<0.05),]
-cat[which(colnames(d) %in% res3$gene_name[which(res3$fc>0)])] = "INF. UP DAY 3"
-cat[which(colnames(d) %in% res3$gene_name[which(res3$fc<0)])] = "INF. DOWN DAY 3"
-
-### For day 7 of infection
-# res = read.csv("../data/proteins_difexp_day_7.csv")
-# res3 = res[which(res$adj.p.value<0.05),]
-# cat[which(colnames(d) %in% ress2$gene_name[which(ress2$fc>0)])] = "INF. UP DAY 7"
-# cat[which(colnames(d) %in% ress2$gene_name[which(ress2$fc<0)])] = "INF. DOWN DAY 7"
-
-deg = apply(d, 1, sum)
-deg = deg-1
-summary(deg)
-
-net %v% "cat" = cat
-net %v% "node size" = as.numeric(deg)
-
-colpallete = c("#9999CC", "#009E73", "#D55E00")
-
-n_plot = ggnet2(net, color="cat", size="node size", alpha="cat",
-                edge.size = 0.25, edge.color = "gray95",
-                shape=16, size.palette = c(0.15,3,8,20,40),
-                alpha.palette = c(0.2, 1, 1, 1, 1, 1, 1, 1)) +
-  #scale_shape_manual(name="ENR", values=c(8, 15:18, 1)) +
-  scale_color_manual(name="Gene sets", values=colpallete) +
-  guides("size"="none")
-n_plot
-
-ndf = n_plot$data
-ndf$selected = NA
-for (i in names(table(ndf$color))[-1]) {
-  ndf$selected[which(ndf$color==i)] = ndf$label[which(ndf$color==i)]
-}
-
-netw_plot = n_plot +
-  new_scale_color() +
-  geom_text_repel(data=ndf, aes(x=x, y=y, color=color), 
-                  label=ndf$selected, size=4,
-                  max.overlaps = 10) +
-  scale_color_manual(values=colpallete, guide="none") +
-  theme(legend.position = c(0.2, 0.9))
-netw_plot
-
-ggsave("network_plot_proteins_highly(0.8)_cocorrelated_3_day_infection.pdf", 
-       netw_plot, dpi=300, 
-       width=8, height=5)
 
 ```

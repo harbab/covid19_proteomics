@@ -8,29 +8,30 @@ editor_options:
 ---
 
 ```{r setup, include=FALSE}
-library(readxl)
-library(ggplot2)
-library(ggrepel)
-library(stringr)
-library(seqinr)
+pack = c("readxl", "ggpubr", "ggplot2", "ggrepel", "stringr", "seqinr", "cowplot")
+lapply(pack, require, character.only = TRUE)
 
 # Don't forget to change the working directory 
-setwd("code_submission/data")
+setwd("code_resubmission/data")
 files = list.files()
 
-df2 = read_delim("genes_table_inf_cells.txt")
-df = df2[, grep("X__POOL", colnames(df2))]
+df2 = read_delim("genes_table_infected_cells.txt")
+df = df2[, grep(".+_set", colnames(df2))]
 colnames(df)
-colnames(df) = gsub("X__POOL_", "", colnames(df))
 colnames(df) = gsub("_set.+", "", colnames(df))
 
+# Extract only the proteins' table
 df = as.data.frame(apply(df, 2, as.numeric))
 #rownames(df) = df2$`Protein ID` # For protein tables
 rownames(df) = df2$`Gene Name`
+
+# Check the distribution of the data
 hist(as.matrix(df), breaks=100)
 boxplot(df)
 colnames(df)
 
+# Remove rows with missing values. The samples are run in triplicates and assigned in separate sets. 
+# Thus, a missing value in one set will make the analysis not possible
 dfcell = na.omit(df)
 af = as.matrix(dfcell)
 rownames(af)
@@ -141,9 +142,9 @@ Comparing differentially altered proteins in cell lines to those in serum
 ```{r comparison_serum, include=FALSE}
 
 ### Comparison to the differentialy altered proteins in serum
-tres = read.csv("covid_vs_hc_all_res.csv")
-pls = tres[which(tres$adj.p<0.05),]
-pls$cell_fc = ress3$fc[match(pls$gene, ress3$gene_name)] # Change here for  the day of interest
+tres = read.csv("covid_vs_hc_all_res.csv") # This loads the proteins analysed in serum
+pls = tres[which(tres$adj.p<0.05),] # This subsets the analysis only to statistically significant proteins
+pls$cell_fc = ress3$fc[match(pls$gene, ress3$gene_name)] # Change here for the day of interest
 
 pls$cat = NA
 pls$cat[which(pls$fc>0 & pls$cell_fc>0)] = paste('\U2191', "Plasma,", '\U2191', "Infected cells")
@@ -192,16 +193,16 @@ ggsave("Plasma_vs_Cell_line_Day_3.jpeg", p, dpi=600, width=8, height=8)
 
 ```
 
-Boxplots per protein of interest
+Boxplots for levels at different days of infection and serum per protein of interest
 ```{r boxplots_per_protein, include=FALSE}
-library(ggpubr)
 
-# Load the analysed proteins
+# Load the matrix for the analysed proteins in the serum
 dfaf = read.csv("analysed_protein_matrix.csv", row.names = 1)
 
-#For all of them
-#pls$gene[which(pls$gene %in% unique(c(ress3$gene_name, ress7$gene_name)))]
-selected = c("ISG15", "MX1", "PSMB8")
+# To run all the proteins that were statistically significant in the infected cells deselect the line below 
+# selected = pls$gene[which(pls$gene %in% unique(c(ress3$gene_name, ress7$gene_name)))]
+# To run the overlapping proteins at Day 3 and Day 7
+selected = c("ISG15", "MX1", "UBE2L6", "ISG20", "STAT1", "LAP3", "PSME1", "PSMB10", "PSMB8", "TYMP", "LGALS3BP", "SERPINB1", "WARS1", "NAMPT", "THOP1", "ALDOC") 
 
 for (i in selected) {
   gr = c("uninf_3D", "wt_UV_3D", "wt_3D", "wt_7D")
@@ -250,7 +251,7 @@ for (i in selected) {
   scale_y_continuous("log2 relative expression values (ratios)") +
   geom_vline(xintercept = c(3.5, 6.5, 9.5), linetype="dashed", color="#999999") + 
   theme(legend.position="none")
-  #p1
+  p1
   
   a = gsub("X[0-9]+|[0-9]+", "", names(dfaf[i,]))
   bp = as.data.frame(cbind(as.numeric(dfaf[i,]), a))
@@ -265,7 +266,7 @@ for (i in selected) {
   xlab("Group") +
   scale_y_continuous("log2 relative expression values (ratios)") +
   theme(legend.position="none")
-  #p2
+  p2
   
   pp = plot_grid(p1, p2,
           rel_widths = c(2,1))

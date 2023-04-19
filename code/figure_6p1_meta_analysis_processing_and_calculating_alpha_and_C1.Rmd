@@ -1,0 +1,407 @@
+---
+title: "meta_analysis"
+author: "Haris Babačić"
+date: "10/03/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r load_packages, include=FALSE}
+pack <- c("tidyverse", "ggplot2", "matrixStats", "VennDiagram", "ggrepel", "dplyr", "factoextra", "FactoMineR", "ggfortify", "cluster", "gplots", "RColorBrewer", "ComplexHeatmap", "readxl", "cutpointr", "pROC")
+lapply(pack, require, character.only = TRUE)
+
+# Don't forget to set the right working directory!
+setwd("code_submission/data")
+# Load Uniprot annotatio file with different gene IDs
+annot = read.csv("protein_annotation_file.csv")
+
+```
+
+```{r functions, include=FALSE}
+summary_func = function(pt, hc, sdf) {
+  groups = list(pt, hc)
+  names(groups) = c("pt", "hc")
+  mean = list()
+  sd = list()
+  number = list()
+  
+  for (i in names(groups)) {
+  sel = which(colnames(sdf) %in% groups[[i]])
+  mean[[i]] <- apply(sdf[,sel], 1, function(x) mean(x, na.rm=T))
+  number[[i]] <- apply(sdf[,sel], 1, function(x) length(which(!is.na(x))))
+  sd[[i]] <- apply(sdf[,sel], 1, function(x) sd(x, na.rm=T))
+  }
+  
+  sum <- as.data.frame(cbind(do.call(cbind, mean), do.call(cbind, sd), do.call(cbind, number)))
+  colnames(sum) <- c(paste("mean", c("covid", "healthy"), sep="_"), 
+                  paste("sd", c("covid", "healthy"), sep="_"),
+                  paste("number", c("covid", "healthy"), sep="_"))
+  sum
+}
+
+sdf2_func = function(sdf, genenames, protnames) {
+  
+  dupl = duplicated(genenames)
+  sel = which(dupl==T)
+  chosen1 = unique(genenames[sel])
+  rem = c(which(is.na(chosen1)), which(chosen1==""))
+  if(!is_empty(rem)) {
+    chosen = chosen1[-rem]
+  } else {
+    chosen = chosen1
+  }
+  
+  sel = list()
+  not = list()
+  for (z in chosen) {
+    sel[[z]] = protnames[which(genenames==z)]
+    not[[z]] = length(grep(";", sel[[z]]))==length(sel[[z]])
+  }
+  
+  r = names(which(not==T))
+  chosen2 = chosen[-which(chosen %in% r)]
+  
+  sel = protnames[which(genenames %in% chosen2)]
+  remprot = sel[grep(";", sel)]
+  
+  if(!is_empty(remprot)) {
+    rem = which(rownames(sdf) %in% remprot)
+    sdf = sdf[-rem,]
+    genenames = genenames[-rem]
+    protnames = protnames[-rem]
+  }
+  
+  sdfs = list()
+  for(z in chosen) {
+    sel = which(genenames==z)
+    sdfss = as.matrix(sdf[sel,])
+    sdfss = apply(sdfss, 2, as.numeric)
+    if(ncol(sdfss)>=2){
+      sdfs[[z]] = apply(sdfss, 2, function(x) {median(x, na.rm=T)})
+    } else {
+      sdfs[[z]] = as.list(sdfss)
+    }
+  }
+  
+  sdf = sdf[-which(genenames %in% chosen),]
+  new_sdf = as.matrix(do.call(rbind, sdfs))
+  sdf2 = rbind(sdf, new_sdf)
+  
+  rownames(sdf2)[match(chosen, rownames(sdf2))] = protnames[match(chosen, genenames)]
+  
+  sdf2
+}
+
+miss_func = function(x) {
+  apply(x, 2, function(x) length(which(is.na(x)))/length(x)*100)
+}
+
+```
+
+```{r alpha_and_c1_estimation, include=FALSE} 
+alpha_C1_function = function(data, selprot, author) {
+  data = as.data.frame(data)
+  
+  cuts = list()
+  study = list()
+  points_study <- list()
+  alphamin_study = list()
+  
+  print("FINDING THE OPTIMAL CUT-OFF BASED ON YOUDEN INDEX")
+  
+  type = data$type
+  for(i in selprot) {
+    cuts[[i]] = cutpointr(data[,i], type, pos_class = "COVID19", break_ties = median,
+                          method = maximize_metric, metric = youden, na.rm=T)
+  }
+  
+  print("ESTIMATING THE α PARAMETER for ROC curves")
+
+  for(i in selprot) {
+    if(cuts[[i]]$direction=="<=") {
+      t = as.vector(table(data[,i]<=cuts[[i]]$optimal_cutpoint, type))
+      names(t) = c("FN", "TP", "TN", "FP")
+    } else {
+      t = as.vector(table(data[,i]>=cuts[[i]]$optimal_cutpoint, type))
+      names(t) = c("FN", "TP", "TN", "FP")
+    }
+    
+    cuts[[i]] = cbind(cuts[[i]], t(t))
+    
+    roc = as.data.frame(cuts[[i]]$roc_curve)
+    colnames(roc)[2:5] = toupper(colnames(roc)[2:5])
+    roc$sens = roc$tpr
+    roc$spec = roc$tnr
+    roc$protein = i
+    roc$cc = 0.1
+    roc$point = 1:nrow(roc)
+    
+    #### Transform extreme values of 0 and 1, to be able to deal with log values
+    roc[,c("cor_sens", "cor_spec")] = roc[,c("sens", "spec")]
+    roc[,c("cor_sens", "cor_spec")] = apply(roc[,c("cor_sens", "cor_spec")], 2, function(s) {
+      replace(s, s>=1, 0.9999) 
+    })
+    roc[,c("cor_sens", "cor_spec")] = apply(roc[,c("cor_sens", "cor_spec")], 2, function(s) {
+      replace(s, s<=0, 0.0001) 
+    })
+    
+    #### Correction coefficient of 0.5 for empty cells in contingency tables
+    roc[,2:5] = t(apply(roc[,2:5], 1, function(s) {
+      if(any(s==0)) {s = s+0.5} 
+      else {
+        s = s
+      }}))
+    
+    roc$npos = roc$TP+roc$FP
+    roc$nneg = roc$TN+roc$FN
+    roc$sum = apply(roc[,2:5], 1, sum)
+    roc$model_type = "maximize_youden_index"
+    colnames(roc)[1] = "cutpoint"
+    
+    ##### This code on estimating alpha is implemented from Sehovic et al. (2022) #####
+    study[[i]] = roc
+    
+    points <- list()
+    m = nrow(roc)
+    
+    for(k in 1:m) {
+      # points[[k]] contains the kth point of study i 
+      points[[k]] <- roc %>%
+        dplyr::filter(point==k) %>%
+        # for each point generate 201 alpha values
+        dplyr::slice(rep(1:n(), each = 201)) %>% 
+        dplyr::mutate(alpha = 0:200/100) 
+      # for each alpha calculate theta = talpha(p) - talpha(q) and variance
+      
+      poin_df = points[[k]]
+      
+      points[[k]] <- points[[k]] %>%
+        dplyr::mutate(alpha_sens = apply(poin_df, 1, function(y) {
+          talpha(as.numeric(y[["alpha"]]))$linkfun(as.numeric(y[["cor_sens"]]))
+        }), ### Added these lines to Sehovic code because the previous code talpha(alpha)$linkfun(sens) didn't work 
+        alpha_spec = apply(poin_df, 1, function(y) {
+          talpha(as.numeric(y[["alpha"]]))$linkfun(1-as.numeric(y[["cor_spec"]]))
+        }),### Added these lines to Sehovic code because the previous code talpha(alpha)$linkfun(1-spec) didn't work 
+        theta = alpha_sens-alpha_spec,
+        vartp = (((2-alpha) * FN + alpha * TP)^2)/(TP*FN*npos),
+        vartq = (((2-alpha) * TN + alpha * FP)^2)/(FP*TN*nneg),
+        vartheta = vartp + vartq)
+    }
+    
+    # group together all the points info (depending on alpha) of the study i
+    for (k in 1:(m-1)) {
+      points[[k+1]] <- bind_rows(points[[k+1]], points[[k]])
+      
+    }
+    
+    # points_study[[i]] contains theta and var(theta) for each alpha for each point of study i
+    points_study[[i]] <- points[[m]] %>%
+      # for each alpha calculate Q and mean(theta)
+      dplyr::group_by(alpha) %>%
+      dplyr::mutate(thetabar = mean(theta),
+                    Q = sum((theta-thetabar)^2/vartheta)) %>%
+      # find alpha for which Q is minimum
+      dplyr::group_by(point) %>%
+      dplyr::mutate(alphamin = alpha[which.min(Q)])
+    
+    # alphamin_study[[i]] contains only the row with minimum Q
+    alphamin_study[[i]] <- points_study[[i]] %>%
+      dplyr::filter(alpha == alphamin) %>%
+      dplyr::filter(point == 1) %>%
+      dplyr::select(TP, FP, FN, TN, sum, npos, nneg, point, sens, spec, protein, 
+                    model_type, cutpoint, thetabar, Q, alphamin)
+    
+    ##### Sehovic et al. (2022) code on estimating alpha ends here #####
+    
+    print(paste("Protein", i, "done.", "No.", match(i, selprot)))
+  }
+  
+  print("ESTIMATION OF α FINISHED.")
+  
+  alpha_res = as.data.frame(do.call(rbind, alphamin_study))
+  cutsum = as.data.frame(do.call(rbind, cuts))
+  
+  results = as.data.frame(cbind(alpha_res[,-c(1:10, 12:13)], cutsum[,-c(14,15)]))
+  results$z_alpha = (results$alphamin-mean(results$alphamin))/sd(results$alphamin)
+  results$log_sens_sp = log(results$sensitivity/results$specificity)
+  
+  results$pref = "Neither"
+  results$pref[results$z_alpha>0.8] = "Sensitivity"
+  results$pref[results$z_alpha<(-0.8)] = "Specificity"
+  
+  # Select proteins that you want to annotate
+  resel = results[-which(results$pref=="Neither"),]
+  sel = c(which(resel$log_sens_sp>0 & resel$pref=="Sensitivity"), 
+          which(resel$log_sens_sp<0 & resel$pref=="Specificity"))
+  resel = resel[sel,]
+  table(resel$pref)
+  
+  results$pref = as.factor(results$pref)
+  table(results$pref)
+  levels(results$pref) = paste(levels(results$pref), table(results$pref), sep=": ")
+  
+  print("DISTRIBUTION OF α IN THE STUDY:")
+  summary(results$alphamin)
+  g = ggplot(results, aes(alphamin, log_sens_sp)) +
+    geom_point(aes(col=pref)) + 
+    geom_smooth(data=results, aes(alphamin, log_sens_sp), 
+                color="black", fill="#2F4F4F") +
+    theme_classic() + 
+    scale_x_continuous("Alpha for Q(min)", limits=c(0,2), seq(0,2,0.25)) +
+    scale_y_continuous("log(Sensitivity/Specificity)", seq(-3,3,0.5)) +
+    geom_hline(yintercept=log(1), size=1, linetype="dotted", col="#882255") + 
+    #geom_vline(xintercept=1, size=1, linetype="dotted", col="#882255") + 
+    scale_color_manual("ROC favours", values=c("darkgray", "#D55E00", "#0072B2"))
+  g
+  
+  ### Transform values of 0 and 1 to 0.9999 and 0.0001, respectively, in order to perform log transformation.
+  results[,c("corr_sens", "corr_spec")] = results[,c("sensitivity", "specificity")]
+  results[,c("corr_sens", "corr_spec")] = apply(results[,c("corr_sens", "corr_spec")], 2, function(s) {
+    replace(s, s>=1, 0.9999) 
+  })
+  results[,c("corr_sens", "corr_spec")] = apply(results[,c("corr_sens", "corr_spec")], 2, function(s) {
+    replace(s, s<=0, 0.0001) 
+  })
+  
+  print("ESTIMATING THE C1 PARAMETER")
+  ##### This code on estimating C1 parameter is implemented from Sehovic et al. (2022) #####
+  # Fix values
+  q <- 1 - results$corr_spec
+  theta <- results$acc
+  alpha <- results$alphamin
+  
+  # talpha (talpha_expr to distiguish from talpha in mada)
+  talpha_expr = expression(alpha*log(x)-(2-alpha)*log(1-x))
+  
+  # Derivative of talpha
+  D_talpha_expr = D(talpha_expr, 'x')
+  
+  # talpha(q)
+  x = q
+  talpha_val_q <- eval(eval(talpha_expr, list(alpha = alpha)), list(x = x))
+  
+  # Inverse of talpha in talpha(q)-theta
+  inv_talpha_val <- numeric()
+  for(i in 1:length(alpha)) {
+    inv_talpha_val[i] <- talpha(alpha[i])$linkinv(talpha_val_q[i]+theta[i])
+  }
+  
+  p <- inv_talpha_val
+  
+  # Derivative of talpha in p and q
+  x = p
+  d_talpha_val_p <- eval(eval(D_talpha_expr, list(alpha = alpha)), list(x = x))
+  
+  x = q
+  d_talpha_val_q <- eval(eval(D_talpha_expr, list(alpha = alpha)), list(x = x))
+  
+  # Add the values to cost db
+  results$talpha_val_q <- talpha_val_q
+  results$inv_talpha_val <- inv_talpha_val
+  results$d_talpha_val_q <- d_talpha_val_q
+  results$d_talpha_val_p <- d_talpha_val_p
+  
+  # Fixed prevalence 
+  #results$prevalence <- 0.02 # Changed here to reflect the prevalence in the actual dataset
+  # It didn't change the estimate when using fixed prevalence.
+  
+  # C1 cost
+  results <- results %>%
+    mutate(c1_prev = (1-prevalence)/prevalence * (d_talpha_val_p/d_talpha_val_q),
+           c1 =  (d_talpha_val_p/d_talpha_val_q),
+           z_c1 = (c1-1)/sd(c1),
+           z_alphamin = (alphamin-mean(alphamin))/sd(alphamin),
+           cat_c1 = cut(z_c1,breaks=c(-Inf,-0.8,0.8,Inf)),
+           cat_alphamin = cut(z_alphamin,breaks=c(-Inf,-0.8,0.8,Inf)))
+  
+  spec_preference_alpha <- results %>%
+    filter(z_alphamin< -0.8)
+  
+  spec_preference_alpha <- spec_preference_alpha %>%
+    mutate(higher_spec = ifelse(specificity>sensitivity,1,0))
+  table(spec_preference_alpha$higher_spec)
+  
+  sens_preference_alpha <- results %>%
+    filter(z_alphamin>0.8)
+  
+  sens_preference_alpha <- sens_preference_alpha %>%
+    mutate(higher_sens = ifelse(specificity<sensitivity,1,0))
+  table(sens_preference_alpha$higher_sens)
+  
+  ##### Sehovic et al. (2022) code on estimating C1 ends here #####
+  
+  levels(results$cat_c1) = c("FN", "Neither", "FP")
+  t2 = table(results$cat_c1)
+  levels(results$cat_c1) = paste(names(t2), t2, sep=": ")
+  
+  # C1 method
+  summary(results$c1)
+  
+  print("DISTRIBUTION OF THE C1 PARAMETER")
+  g2 = ggplot(results, aes(c1, log(sensitivity/specificity))) +
+    geom_point(aes(col=cat_c1)) + 
+    geom_smooth(data=results, aes(c1, log(sensitivity/specificity)), 
+                color="#000000") +
+    theme_classic() + 
+    scale_x_continuous("C1: Relative perceived cost of misdiagnosis", limits=c(0,2), seq(0,2,0.25)) +
+    scale_y_continuous("log(Sensitivity/Specificity)", seq(-3,3,0.5)) +
+    geom_hline(yintercept=log(1), size=1, linetype="dotted", col="#882255") + 
+    #geom_vline(xintercept=1, size=1, linetype="dotted", col="#882255") + 
+    scale_color_manual("ROC favours", values=c("#D55E00", "darkgray", "#0072B2"))
+  g2
+
+  # Save results
+  ggsave(paste(author, "_alpha_for_minq.pdf", sep=""), g, dpi=600, width=6, height=4)
+  ggsave(paste(author, "_C1_parameter.pdf", sep=""), g2, dpi=600, width=6, height=4)
+  write.csv(results, paste(author, "_optimal_cutoff_alpha_c1_results.csv", sep=""))
+  
+  system("say The loop has finished. You are welcome!")
+  print("RUN FINISHED! :)")
+}
+
+```
+
+```{r create_samples_lists, include=FALSE} 
+
+patients = list()
+controls = list()
+
+```
+
+An example of using the functions on our dataset
+```{r summary_ourstudy, include=FALSE}
+setwd("../results/")
+data = as.data.frame(read.delim("genes_table_serum.txt"))
+sdf = as.matrix(data[,15:46])
+sdf = sdf[,-grep("IS", colnames(sdf))]
+rownames(sdf) = data$Gene.Name
+
+pt = colnames(sdf)[-grep("HC", colnames(sdf))]
+hc = colnames(sdf)[grep("HC", colnames(sdf))]
+
+patients[["babacic"]] = list(pt, pt)
+controls[["babacic"]] = list(hc, hc)
+
+sum = summary_func(pt, hc, sdf)
+
+sum$gene_name = rownames(sum)
+sum$uniprot = annot$uniprotswissprot[match(sum$gene_name, annot$external_gene_name)]
+sum$gene_id = annot$ensembl_gene_id[match(sum$gene_name, annot$external_gene_name)]
+sum$prot_id = annot$ensembl_peptide_id[match(sum$gene_name, annot$external_gene_name)]
+sum$entrez_id = annot$entrezgene_id[match(sum$gene_name, annot$external_gene_name)]
+
+write.csv(sum, "processed_data/summary_estimates/babacic_2022_summary.csv", row.names = F)
+
+#### ROC curves
+x = as.data.frame(t(sdf))
+sel = which(sum$number_covid>2 & sum$number_healthy)
+x = x[,sel]
+x$type = "HC"
+x$type[match(pt, rownames(x))] = "COVID19"
+selprot = colnames(x)[-ncol(x)]
+
+# New ROC curve run with alpha and C1 parameters estimation
+alpha_C1_function(x, selprot, "processed_data/roc_curves_alpha_c1/babacic_2023")
+
+```

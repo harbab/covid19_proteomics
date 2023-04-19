@@ -1,0 +1,754 @@
+---
+title: "Bivariate GLMM model with alpha estimation"
+author: "Haris Babačić"
+date: "2023-02-27"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r load data, include=FALSE}
+# Load data if you don't want to wait for the loops
+load("~/Desktop/covid_hirief/meta_analysis_resource_2023.RData")
+
+```
+
+```{r packages and functions, include=FALSE}
+
+### This code was reused from a study by Sehovic et al. Meta-analysis of diagnostic cell-free circulating microRNAs for breast cancer detection. BMC Cancer. 2022 Jun 9;22(1):634. doi: 10.1186/s12885-022-09698-8. PMID: 35681127; PMCID: PMC9178880. 
+### The code is implementing a meta-analytical approach in estimating diagnostic accuracy by Doebler P, Holling H. Meta-analysis of Diagnostic Accuracy and ROC Curves with Covariate Adjusted Semiparametric Mixtures. Psychometrika. 2015 Dec;80(4):1084-104. doi: 10.1007/s11336-014-9430-0. Epub 2014 Nov 1. PMID: 25361619.
+### Some of the functions are used from the package mada, slightly modified for the purposes of this analysis. The modifications are annotated in the script.
+
+##### Packages needed #####
+library(lme4)
+library(kableExtra)
+library(pacman)
+
+##### FUNCTIONS #####
+logit <- function(x) {
+  y = log(x/(1-x))
+  return(y)
+}
+
+#------------Inverse logit---------
+
+inv.logit <- function(x){
+  y = exp(x)/(1+exp(x))
+  return(y)
+}
+
+# Reshaping data in long format for glmer input
+reshape.data <- function(data){
+  
+  groupD <- data.frame(study=data$study, 
+                       wellclassified=data$TP, 
+                       misclassified=data$FN, 
+                       group="disease",
+                       model = 1:dim(data)[1])
+  # We excluded the model_id variable, because we model sensitivity and specificity based only on the study
+  
+  groupH <- data.frame(study=data$study, 
+                       wellclassified=data$TN, 
+                       misclassified=data$FP, 
+                       group="healthy",
+                       model = 1:dim(data)[1])
+  
+  data_long <- bind_rows(groupD, groupH) %>%
+    as.data.frame()
+  
+  return(data_long)
+  
+}
+
+
+# Glmer output
+tab.glmer <- function(m) {
+  
+  est <- m@beta
+  conf <- confint(m, method = 'Wald')[c('groupdisease', 'grouphealthy'),]
+  std_study <- attr(VarCorr(m)$study, 'stddev')
+  # We excluded the model variable, because we model sensitivity and specificity based only on the study
+  corr_study <- attr(VarCorr(m)$study, 'correlation')[1,2]
+  n_study <- length(unique(factor(m@flist$study)))
+  
+  res <- cbind(est, conf) %>%
+    as.data.frame() %>%
+    dplyr::mutate_all(inv.logit)
+  
+  tab <- cbind(res, std_study, corr_study, n_study)
+  rownames(tab) <-  c('Sensitivity', 'Specificity')
+  tab
+}
+
+#------------------- SROC functions---------------------------
+
+# Extract results from glmer output
+fit.glmer <- function(model, data) {
+  
+  fit <- list(coefficients = fixef(model),
+              Psi = VarCorr(model)$study, 
+              # We excluded the Omega variable, because we model sensitivity and specificity based only on the study
+              alphasens = 1,
+              alphafpr = 1,
+              logLik = logLik(model),
+              freqdata = data[c('TP','FP','TN','FN')],
+              vcov = matrix(vcov(model)@x,nrow=2),
+              sens = data$TP/(data$TP+data$FN),
+              fpr = data$FP/(data$FP+data$TN))
+  
+  # Change the sign, so that logit FPR is obtained
+  fit$coefficients[2] <- - fit$coefficients[2] 
+  # Change the sign 
+  fit$Psi[1,2] <- fit$Psi[2,1] <- - fit$Psi[2,1]
+  
+  fit$logLik <- NA
+  attr(fit$logLik, "df") <- 5
+  colnames(fit$vcov) <- c('groupdisease', 'grouphealthy')
+  
+  return(fit)
+  
+}
+
+##### Extract fit with the option to modify alpha #####
+# Extract results from glmer output
+fit.glmer.alpha <- function(model, data, alphasens, alphafpr) {
+  
+  fit <- list(coefficients = fixef(model),
+              Psi = VarCorr(model)$study, 
+              alphasens = alphasens,
+              alphafpr = alphafpr,
+              logLik = logLik(model),
+              freqdata = data[c('TP','FP','TN','FN')],
+              vcov = matrix(vcov(model)@x,nrow=2),
+              sens = data$TP/(data$TP+data$FN),
+              fpr = data$FP/(data$FP+data$TN))
+  
+  # Change the sign, so that logit FPR is obtained
+  fit$coefficients[2] <- - fit$coefficients[2] 
+  # Change the sign 
+  fit$Psi[1,2] <- fit$Psi[2,1] <- - fit$Psi[2,1]
+  
+  fit$logLik <- NA
+  attr(fit$logLik, "df") <- 5
+  colnames(fit$vcov) <- c('groupdisease', 'grouphealthy')
+  
+  return(fit)
+  
+}
+
+# Functions from mada
+# Logit transformation
+trafo <- function(alpha, x){return(talpha(alpha)$linkfun(x))}
+# Inverse logit transformation
+inv.trafo <- function(alpha, x){return(talpha(alpha)$linkinv(x))}
+
+# Modified mada functions for glmer output
+calc_hsroc_coef <- function(fit){
+  coef <- fit$coefficients
+  coef <- as.numeric(coef)
+  
+  Psi <- fit$Psi  
+  ran.sd <- sqrt(diag(Psi))
+  
+  if(attr(fit$logLik,"df")== 5){
+    # HSROC parameters (formulae from Harbord et al. 2008)
+    Theta <- 0.5*(sqrt(ran.sd[2]/ran.sd[1])*coef[1] + sqrt(ran.sd[1]/ran.sd[2])*coef[2]) 
+    Lambda <- sqrt(ran.sd[2]/ran.sd[1])*coef[1] - sqrt(ran.sd[1]/ran.sd[2])*coef[2] 
+    sigma2theta <- 0.5*(ran.sd[1]*ran.sd[2] + Psi[1,2]) 
+    sigma2alpha <- 2*(ran.sd[1]*ran.sd[2] - Psi[1,2])  
+    beta <- log(ran.sd[2]/ran.sd[1])             
+    coef_hsroc <- list(Theta = Theta,
+                       Lambda = Lambda,
+                       beta = beta,
+                       sigma2theta = sigma2theta,
+                       sigma2alpha = sigma2alpha)
+    coef_hsroc <- lapply(coef_hsroc, function(x){attr(x, "names") <- NULL; x})
+  }else{
+    coef_hsroc = NULL
+  }
+  if(is.null(coef_hsroc)){
+    warning("Can only compute coefficients for SROC curves without covariates. Returning NULL.")
+  }
+  return(coef_hsroc)
+}
+
+# SROC function for glmer output
+sroc.glmer <- function(fit, fpr = 1:99/100, type = "ruttergatsonis",
+                       return_function = FALSE, ...){
+  stopifnot(is.logical(return_function))
+  stopifnot(type %in% c("ruttergatsonis", "naive"))
+  if(type == "ruttergatsonis"){
+    coef_hsroc <- calc_hsroc_coef(fit)
+    Lambda <- coef_hsroc$Lambda    
+    Beta <- coef_hsroc$beta
+    f <- function(x){
+      return(inv.trafo(fit$alphasens, (Lambda*exp(-Beta/2) + exp(-Beta)*trafo(fit$alphafpr, x))))
+    }
+    sens <- f(fpr)
+    if(!return_function){
+      return(cbind(fpr, sens))
+    }else{
+      return(f)
+    }
+  }
+}
+
+
+# ROC ellipse function for glmer output
+ROC.ellipse2 <- function(fit, conf.level = 0.95, pch = 1, add = TRUE, 
+                         predict = TRUE, predlty = 3, predlwd = 1, predcol = 1, ...)
+{
+  alpha.sens <- fit$alphasens
+  alpha.fpr <- fit$alphafpr
+  mu <- fit$coefficients
+  Sigma <- fit$vcov
+  
+  vcov <- fit$vcov
+  Psi <- fit$Psi
+  Omega <- fit$Omega
+  
+  talphaellipse <- ellipse::ellipse(Sigma, centre = mu, level = conf.level)
+  ROCellipse <- matrix(0, ncol = 2, nrow = nrow(talphaellipse))
+  ROCellipse[,1] <- inv.trafo(alpha.fpr, talphaellipse[,2])
+  ROCellipse[,2] <- inv.trafo(alpha.sens, talphaellipse[,1])
+  
+  if(predict) {
+    if(is.null(Omega)) {
+      Sigma_pred <- Psi + vcov
+    } else {
+      Sigma_pred <- Psi + Omega + vcov
+    }
+    talphaellipse_pred <- ellipse::ellipse(Sigma_pred, centre = mu, level = conf.level)
+    predellipse <- matrix(0, ncol = 2, nrow = nrow(talphaellipse_pred))
+    predellipse[,1] <- inv.trafo(alpha.fpr, talphaellipse_pred[,2])
+    predellipse[,2] <- inv.trafo(alpha.sens, talphaellipse_pred[,1])
+    
+  }
+  
+  if(add){
+    lines(ROCellipse, ...)
+    points(inv.trafo(alpha.fpr, mu[2]), 
+           inv.trafo(alpha.sens, mu[1]), pch = pch, ...)
+    lines(predellipse, lty = predlty, lwd = predlwd, col=predcol) 
+    return(invisible(NULL))
+  }
+  if(!add){
+    return(list(ROCellipse = ROCellipse, 
+                fprsens = matrix(c(inv.trafo(alpha.fpr, mu[2]), 
+                                   inv.trafo(alpha.sens, mu[1])),nrow = 1)))
+  }
+  
+}
+
+
+
+ROCellipse.glmer <- function(x, level = 0.95, add = FALSE, pch = 1,
+                             predict = FALSE, predlty = 3, predlwd = 1, predcol = 1, ...){
+  ROC.ellipse2(x, conf.level = level, add = add, pch = pch,  
+               predict = predict,  predlty = predlty, predlwd = predlwd, predcol = predcol, ...)
+  
+}
+
+# Plot function for glmer output
+plot.glmer <- function(x, extrapolate = TRUE, plotsumm = TRUE, level = 0.95, 
+                       ylim = c(0,1), xlim = c(0,1), pch = 1, 
+                       sroclty = 1, sroclwd = 1, 
+                       predict = FALSE, 
+                       predlty = 3, predlwd = 1, predcol = 1,
+                       type = "ruttergatsonis",
+                       ...)
+{
+  plot(c(2,2), ylim = ylim, xlim = xlim, 
+       xlab = "False Positive Rate", ylab = "Sensitivity", ...)
+  if(length(x$coefficients) == 2){
+    FP <- x$freqdata$FP
+    negatives <- FP + x$freqdata$TN
+    FPR <- FP/negatives
+    
+    if(extrapolate){bound = c(0,1)}
+    if(!extrapolate){bound = c(min(FPR), max(FPR))}
+    srocmat <- sroc.glmer(x)
+    lines(srocmat[cut(srocmat[,1],bound, "withinbound") == "withinbound",], 
+          lty = sroclty, lwd = sroclwd)
+  }else{
+    warning("Not plotting any SROC for meta-regression")
+  }
+  if(plotsumm){
+    ROCellipse.glmer(x, level = level, add = TRUE, pch = pch, 
+                     predict = predict, predlty = predlty, predlwd = predlwd, predcol = predcol, ...)
+  }
+  return(invisible(NULL))
+}
+
+# Plot SROC only on observed data
+sroc.glmer.range <- function(fit) {
+  
+  min_s <- min(fit$sens)
+  max_f <- max(fit$fpr)
+  
+  s <- sroc.glmer(fit) %>%
+    as.data.frame() %>%
+    filter(fpr <= max_f & sens >= min_s)
+}
+
+##### Modified mada functions by us #####
+### Calculate DOR
+DOR_calc = function(sens, fpr){
+  sens*(1-fpr)/((1-sens)*fpr)
+}
+
+### Zwindermann & Bossuyt (2008) MCMC procedure to generate summary points (positive and negative likelihood ratio, diagnostic odds ratio) for the Reitsma et al. (2005) bivariate model
+SummaryPts.glmer <- function(object, n.iter = 10^6, FUN = NULL, ...){
+  SummaryPts.default <- function(object, mu,Sigma,alphasens = 1, alphafpr = 1,
+                                 n.iter = 10^6, FUN, ...){
+    samples <- rmvnorm(n.iter, mu, Sigma)
+    sens <- inv.trafo(alphasens,samples[,1])
+    fpr <- inv.trafo(alphafpr,samples[,2])
+    out <- lapply(FUN, function(x){x(sens, fpr)})
+    class(out) <- "SummaryPts"
+    out
+  }
+  
+  fit <- object
+  if(length(coef(fit)) > 2){
+    stop("SummaryPts is not be used for meta-regression!")}
+  if(is.null(FUN)){FUN <- list(posLR = function(sens,fpr){sens/fpr},
+                               negLR = function(sens,fpr){(1-sens)/(1-fpr)},
+                               invnegLR = function(sens, fpr){(1-fpr)/(1-sens)},
+                               DOR = function(sens, fpr){sens*(1-fpr)/((1-sens)*fpr)})}
+  SummaryPts.default(mu = coef(fit)[1:2], Sigma = fit$vcov, # vcov(fit) didn't work for our output
+                     alphasens = fit$alphasens, 
+                     alphafpr = fit$alphafpr,
+                     n.iter = n.iter, FUN = FUN)
+}
+
+### AUC calculation
+AUC_calc = function(tpr) {
+  n = length(tpr)
+  (tpr[1]/2 + sum(tpr[2:(n-1)]) + tpr[n]/2)/n
+}
+
+```
+
+```{r sroc_meta_analysis, include=FALSE}
+##### ANALYSIS #####
+setwd("/Users/haris.babacic/Desktop/covid_hirief/results/processed_data/roc_curves_alpha_c1")
+f = list.files()
+f = f[grep("_optimal_cutoff_alpha_c1_results", f)]
+studies = str_extract(f, ".+_[0-9]+")
+
+##### Extract the data from the files #####
+res = list()
+for(i in 1:length(f)) {
+  res[[i]] = read.csv(f[i], row.names = 1)
+  res[[i]]$study = studies[i]
+}
+
+##### Estimate sensitivity and specificity with Reitsma's bivariate model using GLMM and the linear model
+all_res = do.call(rbind, res)
+
+mes = table(all_res$protein)
+all_res$nstudy = mes[match(all_res$protein, names(mes))]
+# Because the GLMM models were not good at estimating the covariance based on two studies, we focused only on proteins that have been identified in two studies or more.
+sel_res = all_res[which(all_res$nstudy>2),] 
+
+pprot = list()
+m = list()
+tabs = list()
+reits = list()
+sum = list()
+selprot = unique(sel_res$protein)
+
+for(i in selprot) {
+  pprot[[i]] = all_res[which(all_res$protein==i),c(1,19:22,38)]
+  long_data = reshape.data(pprot[[i]])
+  m[[i]] <- glmer(formula = cbind(wellclassified, misclassified) ~ group-1 + (group-1|study), 
+             data=long_data, 
+             family = binomial(link='logit'),           
+             nAGQ=0)
+  tabs[[i]] = tab.glmer(m[[i]])
+  reits[[i]] = reitsma(pprot[[i]], correction=0.5)
+  sum[[i]] = summary(reits[[i]])
+  
+  print(paste("Protein ", i, ", number ", match(i, selprot), " done.", sep=""))
+}
+
+segm = list()
+selm = list()
+spegm = list()
+spelm = list()
+fits = list()
+TPR = list()
+AUC = list()
+DOR = list()
+sum.pts = list()
+
+for(i in selprot) {
+  segm[[i]] = tabs[[i]][1,1]
+  selm[[i]] = sum[[i]]$coefficients[3,1]
+  spegm[[i]] = tabs[[i]][2,1]
+  spelm[[i]] = 1-sum[[i]]$coefficients[4,1]
+  fits[[i]] = fit.glmer(m[[i]], pprot[[i]])
+  TPR[[i]] = sroc.glmer(fits[[i]])[,2]
+  AUC[[i]] = AUC_calc(TPR[[i]])
+  DOR[[i]] = DOR_calc(segm[[i]], 1-spegm[[i]])
+  sum.pts[[i]] = summary(SummaryPts.glmer(fits[[i]]))
+  print(paste("Protein ", match(i, selprot), " (", i, ") ", "done.", sep=""))
+}
+
+```
+
+```{r sroc_summary_plots, include=FALSE}
+setwd("~/Desktop/covid_hirief/results")
+
+##### Summary plots #####
+bivglm_res = cbind(do.call(rbind, lapply(tabs, function(x) c(x[1,1:3], x[2,]))), 
+                                 do.call(rbind, lapply(sum.pts, function(x) c(x[1,], x[2,], x[4,]))),
+                                 round(unlist(AUC)*100))
+head(bivglm_res)
+bivglm_res = as.data.frame(apply(bivglm_res, 2, as.numeric))
+colnames(bivglm_res) = c("Sensitivity", "Se 95% CI, Lower limit", "Se 95% CI, Upper limit",
+                         "Specificity", "Spec 95% CI, Lower limit", "Spec 95% CI, Upper limit",
+                         "Std Dev Study", "Corr study", "N_study",
+                          "Mean posLR", "Median posLR", "posLR 95% CI, Lower limit", "posLR 95% CI, Upper limit",
+                          "Mean negLR", "Median negLR", "negLR 95% CI, Lower limit", "negLR 95% CI, Upper limit",
+                          "Mean DOR", "Median DOR", "DOR 95% CI, Lower limit", "DOR 95% CI, Upper limit", "AUC")
+bivglm_res$abs_diff = abs(bivglm_res$Sensitivity-bivglm_res$Specificity)
+bivglm_res$protein = selprot
+
+bivglm_res$cat = "Not significant"
+bivglm_res$cat[which(bivglm_res$AUC<70)] = "<70%"
+bivglm_res$cat[which(bivglm_res$AUC>69)] = "70-79%"
+bivglm_res$cat[which(bivglm_res$AUC>79)] = "80-89%"
+bivglm_res$cat[which(bivglm_res$AUC>89)] = "90+%"
+table(bivglm_res$cat)
+bivglm_res$cat[which(bivglm_res$`DOR 95% CI, Lower limit`<1)] = "Not significant"
+bivglm_res$cat[which(bivglm_res$`Se 95% CI, Lower limit`<0.5)] = "Not significant"
+bivglm_res$cat[which(bivglm_res$`Spec 95% CI, Lower limit`<0.5)] = "Not significant"
+table(bivglm_res$cat)
+table(is.na(bivglm_res$cat))
+table(is.na(bivglm_res$AUC))
+#sel = which(is.na(bivglm_res$cat))
+#bivglm_res[sel,]
+
+bivglm_res$cat = factor(bivglm_res$cat)
+bivglm_res$cat = ordered(bivglm_res$cat, levels=levels(bivglm_res$cat)[c(5,1:4)])
+
+library(car)
+wald_z = lapply(m, function(x) Anova(x))
+bivglm_res$Wald_Pval = as.numeric(lapply(wald_z, function(x) x$`Pr(>Chisq)`))
+bivglm_res$adj.Pval = p.adjust(bivglm_res$Wald_Pval, method="fdr")
+table(bivglm_res$Wald_Pval<0.05)
+table(bivglm_res$adj.Pval<0.05)
+
+res_annot = bivglm_res[which(bivglm_res$AUC>80 & bivglm_res$cat!="Not significant"),]
+
+p1 = ggplot(bivglm_res, aes(x=1-Specificity, y=Sensitivity, col=cat)) +
+  geom_point() + theme_classic() +
+  geom_text_repel(data=res_annot, aes(label=protein), max.overlaps = 30) +
+  scale_color_manual(values=c("lightgray", "#0072B2", "#56B4E9", "#E69F00", "#D55E00")) +
+  scale_x_continuous(limits = c(0,1), breaks=seq(0,1,0.2)) +
+  scale_y_continuous(limits = c(0,1), breaks=seq(0,1,0.2)) +
+  geom_segment(x = 0, y = 0, xend = 1, yend = 1, col="black", linetype="dashed", size=1) +
+  theme(legend.position = c(0.8, 0.3))
+p1 
+
+ggsave("GLMM_Meta_analysis_SROC_curves_significant.pdf", p1, dpi=600, width=7, height=5.5)
+
+library(ggpubr)
+library(ggpmisc)
+p2 = ggplot(bivglm_res, aes(x=N_study, y=abs_diff)) +
+  geom_jitter() + theme_classic() +
+  stat_smooth(color="#CC6666", method="glm") +
+  stat_cor(label.x=8, label.y = 0.4, method="spearman") +
+  stat_poly_eq(label.x=10, label.y=0.6, 
+               aes(label = paste(after_stat(rr.label), sep = "*\", \"*"))) +
+  scale_x_continuous("N of cohorts", 
+                     breaks=seq(1, max(bivglm_res$N_study), 1)) +
+  scale_y_continuous("|Δ| between Sens. and Spec", breaks=seq(0,0.6,0.1))
+p2
+
+ggsave("GLMM_Meta_analysis_SROC_abs_diff_se_spec.pdf", p2, dpi=600, width=7, height=5.5)
+
+p3 = ggplot(bivglm_res, aes(x=Specificity, y=Sensitivity)) +
+  geom_point() + theme_classic() +
+  stat_smooth(color="#CC6666", method = "glm") +
+  stat_cor(label.x=0.5, label.y = 0.4, method="spearman") +
+  stat_poly_eq(label.x=0.5, label.y=0.3, 
+               aes(label = paste(after_stat(rr.label), sep = "*\", \"*"))) +
+  scale_x_continuous("Specificity", breaks=seq(0,1,0.1)) +
+  scale_y_continuous("Sensitivity", breaks=seq(0,1,0.1))
+p3
+
+ggsave("GLMM_Meta_analysis_SROC_Sens_vs_spec.pdf", p3, dpi=600, width=7, height=5.5)
+
+p4 = ggplot(bivglm_res, aes(x=N_study, y=AUC)) +
+  geom_jitter() + theme_classic() +
+  stat_smooth(color="#CC6666", method="glm") +
+  stat_cor(label.x=5, label.y = 90, method="spearman") +
+  stat_poly_eq(label.x=7, label.y=80, 
+               aes(label = paste(after_stat(rr.label), sep = "*\", \"*"))) +
+  scale_x_continuous("N of cohorts", 
+                     breaks=seq(1, max(bivglm_res$N_study), 1)) +
+  scale_y_continuous("AUC", breaks=seq(0,100,5))
+p4
+
+ggsave("GLMM_Meta_analysis_SROC_AUC.pdf", p4, dpi=600, width=7, height=5.5)
+
+```
+
+```{r alpha_preference_plot, include=FALSE}
+##### Alpha preference plot #####
+selres = all_res[which(all_res$nstudy>2),]
+selres$log_sens_sp
+selres$new_z_alpha = (selres$alphamin-mean(selres$alphamin))/sd(selres$alphamin)
+table(abs(selres$new_z_alpha)>1)
+selres$new_z_cat = "None"
+selres$new_z_cat[which(selres$alphamin>
+                          quantile(selres$alphamin, 0.80))] = "Sens.(α>80%Q)"
+selres$new_z_cat[which(selres$alphamin>
+                          quantile(selres$alphamin, 0.90))] = "Sens.(α>90%Q)"
+selres$new_z_cat[which(selres$alphamin<
+                          quantile(selres$alphamin, 0.20))] = "Spec.(α<20%Q)"
+selres$new_z_cat[which(selres$alphamin<
+                          quantile(selres$alphamin, 0.10))] = "Spec.(α<10%Q)"
+table(selres$new_z_cat)
+
+selres$bivar_sens = NA
+selres$bivar_spec = NA
+for(i in unique(selres$protein)) {
+  selres$bivar_sens[which(selres$protein==i)] = 
+    bivglm_res$Sensitivity[which(bivglm_res$protein==i)]
+  selres$bivar_spec[which(selres$protein==i)] = 
+    bivglm_res$Specificity[which(bivglm_res$protein==i)]
+}
+
+selres$bivar_log_sens_sp = log(selres$bivar_sens/selres$bivar_spec)
+
+p5 = ggplot(selres, aes(x=alphamin, y=bivar_log_sens_sp, 
+                        col=new_z_cat # remove the tabs for estimating R2
+                        )) +
+  geom_point() + theme_classic() +
+  stat_smooth(color="black", size=0.75, method="glm") +
+  #stat_cor(label.y=2, method="spearman") + # tab for estimating R2
+  #stat_poly_eq(label.y=0.5,
+  #              aes(label = paste(after_stat(rr.label), sep = "*\", \"*"))) +
+  scale_y_continuous("log(Sensitivity/Specificity)", breaks=seq(-1,1,0.25)) +
+  scale_x_continuous(breaks=seq(0,2,0.25)) +
+  scale_color_manual("Preference", 
+                     values=c("lightgray", "#E69F00", "#D55E00", "#56B4E9", "#0072B2")) +
+  geom_hline(yintercept = 0, linetype="twodash", color="#6A51A3", size=1)
+p5
+
+ggsave("GLMM_Meta_analysis_SROC_alphamin_log_se_spec.pdf", p5, dpi=600, width=7, height=5.5)
+
+##### Combine summary plots #####
+p = ggarrange(ggarrange(p5, p3, ncol=2, widths=c(2,1)), ggarrange(p2, p4, ncol=2), 
+              nrow=2, heights = c(1.75, 1.25))
+ggexport(p, filename = "GLMM_sroc_analysis_parameters.pdf", dpi=600, width=7.6364, height=5.5)
+
+
+write.csv(selres, "GLMM_meta_analysis_all_results_with_parameters_3+studies.csv")
+write.csv(bivglm_res, "GLMM_meta_analysis_summary_AUC_results.csv")
+
+##### Save files for the shiny app
+setwd("shiny_covid/data")
+write_rds(pprot, "sroc_pprot.RData")
+write.csv(selprot, "sroc_selprot.csv")
+write_rds(m, "sroc_models.Rdata")
+write_rds(tabs, "sroc_tabs.Rdata")
+write_rds(fits, "sroc_fits.Rdata")
+write_rds(sum.pts, "sroc_sum.pts.Rdata")
+write.csv(unlist(AUC), "AUC.csv")
+write.csv(unlist(DOR), "DOR.csv")
+write.csv(studies, "studies2.csv")
+write.csv(selres, "selres.csv")
+write.csv(bivglm_res, "bivglm_res.csv")
+
+save.image("~/Desktop/covid_hirief/meta_analysis_resource_2023.RData")
+
+```
+
+```{r lm_vs_glmm_estimation, include=FALSE}
+
+lm = lm(Sensitivity ~ Specificity, data=bivglm_res)
+summary(lm)
+
+summary(unlist(segm)-unlist(selm))
+summary(unlist(spegm)-unlist(spelm))
+boxplot(unlist(spegm)-unlist(spelm), unlist(segm)-unlist(selm))
+
+diff = as.data.frame(cbind(c(unlist(spegm)-unlist(spelm), unlist(segm)-unlist(selm)),
+                             c(rep("Specificity", length(spegm)), rep("Sensitivity", length(spegm)))))
+
+colnames(diff)
+diff$V1 = as.numeric(diff$V1)
+diff_plot = ggplot(diff, aes(x=V2, y=V1)) +
+  geom_jitter(col="darkgray") +
+  geom_boxplot(fill=NA, col="#882255", size=0.75) +
+  theme_classic() +
+  xlab(NULL) +
+  scale_y_continuous("GLMM estimate - LM estimate", 
+                     breaks=seq(-0.5, 0.40, 0.025))
+diff_plot
+
+ggsave("GLMM_LM_diference.pdf", diff_plot, dpi=600, width=4.5, height=3)
+
+```
+
+```{r SROC_curve_plot_per_protein, include=FALSE}
+##### SROC curves #####
+sel = names(which(AUC>0.89))
+sel2 = sel_res$protein[which(sel_res$nstudy>4)]
+intersect(sel, sel2)
+
+i = "ORM1"
+data_complete = pprot[[i]]
+
+plot.glmer(fits[[i]], type = 'ruttergatsonis', 
+           xlim = c(0,1), ylim = c(0,1), sroclwd = 1, sroclty = 2, predict = T,
+           main = "A")
+lines(sroc.glmer.range(fits[[i]]), lwd = 2, lty = 1)
+points(fpr(fits[[i]]$freqdata), sens(fits[[i]]$freqdata), pty = 's', pch= 16, cex=0.8,
+       col= factor(pprot[[i]]$study))
+vals = sroc.glmer(fits[[i]])
+plot(vals[,1], vals[,2])
+
+vals2 = sroc(reits[[i]])
+
+plodf = as.data.frame(cbind(rep(vals[,1], 2), c(vals2[,2], vals[,2]), 
+                    c(rep("Linear", 99), rep("GLMM", 99))))
+colnames(plodf) = c("FPR", "TPR", "Model")
+plodf[,-3] = apply(plodf[,-3], 2, as.numeric)
+el = ROCellipse.glmer(fit_complete)
+el$ROCellipse
+
+ggplot(plodf, aes(x=FPR, y=TPR, col=Model)) +
+  geom_point() +
+  theme_classic()
+
+##### Make a plotly SROC plot #####
+#### Extract data for the SROCs
+sr = sroc.glmer(fits[[i]]) ## To get the SROC curve data
+# msr = mcsroc(fit.reitsmas[[z]])
+re = ROCellipse.glmer(fits[[i]], level=0.95)
+rdf = as.data.frame(re$ROCellipse)
+
+sr = as.data.frame(sr)
+s = tabs[[i]][,1:3]
+s[2,] = 1-s[2,]
+sspr = as.data.frame(s)
+tsspr = as.data.frame(t(sspr))
+colnames(tsspr) = c("y", "x")
+
+a = AUC[[i]]
+
+# To figure out how to calculate DOR and LR
+sf = sum.pts[[i]] 
+sf[4, c(1,3,4)]
+
+##### Convert to plotly
+plot_ly(x = sr$fpr, y = sr$sens, type = 'scatter', mode = 'lines', name="SROC") %>%
+  add_lines(y = c(0, 1), x = c(0, 1), name="Chance", line=list(dash="dash")) %>%
+  add_trace(x = s[2,1], y = s[1,1], 
+            name = 'MA Estimate', mode = 'markers', 
+            marker=list(color="#0072B2", size=15, symbol=2)) %>%
+  add_lines(y=c(sspr$est[1], sspr$est[1]), 
+            x=c(sspr$`2.5 %`[2], sspr$`97.5 %`[2]),
+            name="95% CI FPR")  %>%
+  add_lines(x=c(sspr$est[2], sspr$est[2]), 
+            y=c(sspr$`2.5 %`[1], sspr$`97.5 %`[1]),
+            name="95% CI TPR") %>%
+  add_trace(x=rdf$V1, y=rdf$V2, name="95% CI \nellipse around \nmean values") %>%
+  add_annotations(x=1, y=0.1,
+                  text = paste("AUC: ", round(a, 3)),
+                  xanchor = 'right', font=list(size=16),
+                  showarrow = F
+  ) %>%
+  layout(title=paste("SROC curve for protein:", i),
+         xaxis = list(
+           title='FPR (1-Specificity)',
+           zerolinecolor = 'gray',
+           zerolinewidth = 1,
+           #gridcolor = 'ffff',
+           dtick=0.1),
+         yaxis = list(
+           title='Sensitivity',
+           zerolinecolor = 'gray',
+           zerolinewidth = 1,
+           #gridcolor = 'ffff',
+           dtick=0.1)) %>%
+  add_annotations(x=1, y=0.3,
+                  text = paste("Mean DOR: ", round(sf[4,1], 3)),
+                  xanchor = 'right', font=list(size=16),
+                  showarrow = F
+  )  %>%
+  add_annotations(x=1, y=0.25,
+                  text = paste("95% CI:", round(sf[4,3], 3), "-", round(sf[4,4], 3)),
+                  xanchor = 'right', font=list(size=16),
+                  showarrow = F
+)
+
+```
+
+```{r SROC_curve_top_10, include=FALSE}
+##### Choose sproteins of interest #####
+biv_sign = bivglm_res[-which(bivglm_res$cat=="Not significant"),]
+sel = biv_sign$protein[which(biv_sign$N_study>5 & biv_sign$AUC>88)]
+s = list()
+srs = list()
+rdf = list()
+sspr = list()
+auc = list()
+sf = list()
+
+for (z in sel) {
+  
+  #### Extract data for the SROCs
+  sr = sroc.glmer(fits[[z]]) ## To get the SROC curve data
+  re = ROCellipse.glmer(fits[[z]], level=0.95)
+  rdf[[z]] = as.data.frame(re$ROCellipse)
+  
+  srs[[z]] = as.data.frame(sr)
+  sspr[[z]] = as.data.frame(rbind(tabs[[i]][1,1:3], 1-tabs[[i]][2,1:3]))
+  
+  auc[[z]] = AUC[[i]]
+  
+  sfit = SummaryPts.glmer(fits[[i]])
+  sf[[z]] = summary(sfit)
+}
+
+srsz = as.data.frame(do.call(rbind, srs))
+srsz$protein = gsub("[.].+", "", rownames(srsz))
+ssprz = as.data.frame(do.call(rbind, sspr))
+ssprz$protein = gsub("[.].+", "", rownames(ssprz))
+
+scof = list()
+for (i in sel) {
+  scof[[i]] = c(1-tabs[[i]][2,1], tabs[[i]][1,1])
+}
+sz = as.data.frame(do.call(rbind, scof))
+sz$protein = gsub("[.].+", "", rownames(sz))
+rdfz = as.data.frame(do.call(rbind, rdf))
+rdfz$protein = gsub("[.].+", "", rownames(rdfz))
+
+library(RColorBrewer)
+colors = brewer.pal(n = 12, name = "Paired")[-11]
+
+##### Plot the top 10 SROCs
+p = ggplot(srsz, aes(fpr, sens, col=protein)) +
+  geom_mark_hull(data=rdfz, aes(V1, V2, col=protein), expand=0, linetype="dotted", size=0.75) +
+  geom_line(size=1) +
+  scale_x_continuous("FPR (1-Specificity)", limits=c(0,1), breaks=seq(0,1,0.1)) +
+  scale_y_continuous("Sensitivity", limits=c(0,1), breaks=seq(0,1,0.1)) +
+  theme_classic() +
+  geom_segment(x = 0, y = 0, xend = 1, yend = 1, col="black", linetype="dashed", size=1) +
+  geom_point(data=sz, aes(x=V1, y=V2, col=protein, fill=protein), shape=23, size=3) +
+  theme(legend.position = c(0.8, 0.3)) +
+  scale_color_manual("Protein", values=colors) +
+  scale_fill_manual("Protein", values=colors)
+p
+
+ggsave("GLMM_Meta_analysis_SROC_top_11.pdf", p, dpi=600, width=7, height=5.5)
+
+```

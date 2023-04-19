@@ -1,9 +1,14 @@
-# Set the working directory where you saved the folder
-setwd("code_submission/data/study_summary")
+# Load the libraries and set the working directory where you saved the folder
+library(ggplot2)
+library(scales)
+library(ggsci)
+setwd("code_resubmission/data/")
+
 s1 = as.data.frame(read_csv("table_s1.csv"))
 det_prot = read.csv("detected_proteins.csv", row.names = 1)
 
-setwd("../../results/")
+# Plot the number of identified proteins in the dataset obtained from public resources or the authors
+setwd("../results/")
 fit = lm(s1$Proteins_identified ~ s1$N_participants)
 sfit = summary(fit)
 p = ggplot(s1, aes(N_participants, Proteins_identified)) +
@@ -16,33 +21,28 @@ p
 
 ggsave("participants_vs_proteins.pdf", p, width=6.25, height=5)
 
+# Plot in how many cohorts a protein has been identified
 t = table(det_prot$nstud)
 tf = as.data.frame(cbind(names(t), t))
 tf$t = as.numeric(tf$t)
-tf$V1 = factor(tf$V1, levels=1:11)
+tf$V1 = factor(tf$V1, levels=1:nrow(det_prot))
+tf$perc = round(tf$t/sum(tf$t)*100, 1)
 
-library(scales)
-library(ggsci)
+bp <- ggplot(tf, aes(V1, perc))+
+  geom_bar(stat="identity", fill="black") + theme_classic() +
+  scale_y_continuous("% of identified proteins", breaks=seq(0,100,5)) +
+  xlab("N of studies") +
+  geom_text(aes(V1, perc+5), label=paste(tf$t, " (", tf$perc, "%)", sep=""), 
+            angle=45, hjust=0.2)
+bp
 
-bp <- ggplot(tf, aes(x=1, y=t, fill=V1))+
-  geom_bar(width = 1, stat = "identity")
-pie = bp + coord_polar("y", start=0) +
-  scale_fill_brewer("N of studies", palette="Paired") +
-  theme_void() +
-  theme(axis.text.x=element_blank()) +
-  theme(axis.text.y=element_blank()) +
-  geom_text_repel(aes(x=1+seq(0,1,0.1), y = t, 
-                      label = percent(tf$t/sum(tf$t))), size=5)
-pie
+ggsave("pie_studies.pdf", bp, dpi=300, width=6, height=4.8)
 
-ggsave("pie_studies.pdf", pie, dpi=300, width=8, height=6.4)
-
+# Plot the number of identified proteins and number of proteins included in the meta-analysis
 table(s1$Year)
-
 s1[,c(7:11)] = apply(s1[,c(7:11)], 2, as.numeric)
-s1 = s1[-c(1,2,6,14),]
 sdf = as.data.frame(cbind(c(s1$Proteins_identified, s1$`Proteins_in_Meta-analysis`),
-                          c(rep("Identified", 11), rep("Included in MA", 11)),
+                          c(rep("Identified", nrow(s1)), rep("Included in MA", nrow(s1))),
                           c(rep(s1$Author, 2))))
 colnames(sdf) = c("prot", "cat", "author")
 sdf$prot = as.numeric(sdf$prot)
@@ -52,7 +52,7 @@ sdf$author = ordered(sdf$author, levels=s1$Author[order(s1$`Proteins_in_Meta-ana
 
 p = ggplot(sdf, aes(prot, author, fill=cat)) + geom_bar(stat="identity", width=0.75, position="dodge") +
   theme_classic() +
-  scale_x_continuous(breaks=seq(0,2000, 200)) +
+  scale_x_continuous("N of protein", breaks=seq(0,2000, 200)) +
   theme(legend.position = c(0.8, 0.2)) +
   scale_fill_manual("Proteins", values=c("#009E73", "#CC79A7"))
 p

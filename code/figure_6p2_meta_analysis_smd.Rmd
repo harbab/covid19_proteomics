@@ -1,0 +1,588 @@
+---
+title: "meta_analysis"
+author: "Haris Babačić"
+date: "10/03/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+pack <- c("tidyverse", "ggplot2", "matrixStats", "VennDiagram", "ggrepel", "dplyr", "factoextra", "FactoMineR", "ggfortify", "cluster", "gplots", "RColorBrewer", "ComplexHeatmap", "readxl", "cutpointr", "pROC", "mada", "stringr", "reshape2", "esc", "dmetar", "meta", "ggforce", "plotly", "ggpubr", "ggpmisc", "ggalluvial")
+lapply(pack, require, character.only = TRUE)
+
+```
+
+
+```{r meta_analysis, include=FALSE}
+# Calculate s_pooled
+setwd("code_resubmission/data/summary_estimates")
+files = list.files()
+files
+s1 = as.data.frame(read_csv("../table_s1.csv"))
+
+ns = length(files)
+
+df = list()
+for(i in 1:ns) {
+  x = read.csv(files[i])
+  rem1 = which(x$number_covid<3)
+  rem2 = which(x$number_healthy<3)
+  rem = union(rem1, rem2)
+  if(is_empty(rem)) {
+    df[[i]] = x
+  } else {
+    df[[i]] = x[-rem,]
+  }
+  
+  rem2 = which(is.na(df[[i]]$prot_id))
+  if(!is_empty(rem2)) {
+    df[[i]] = df[[i]][-rem2,]
+  }
+}
+
+studies = str_extract(files, ".+_[0-9]+")
+names(df) = studies
+View(df)
+
+# Check if some of the gene names are duplicated and assign the protein names to the NA gene names
+t = list()
+nagens = list()
+for(i in 1:ns) {
+  sel = which(duplicated(df[[i]]$prot_id)==T)
+  t[[i]] = df[[i]]$gene_name[sel]
+  print(t[[i]])
+  
+  re = c(which(is.na(df[[i]]$gene_name)), 
+  which(df[[i]]$gene_name=="NA"), grep("NA[.]", df[[i]]$gene_name),
+  which(df[[i]]$gene_name==""))
+  
+  if(!is_empty(re)) {
+    nagens[[i]] = df[[i]]$uniprot[re]
+    df[[i]]$gene_name[re] = nagens[[i]]
+  } else {
+    nagens[[i]] = "None"
+  }
+}
+names(t) = studies
+names(nagens) = studies
+# This list should be empty: 
+table(unlist(lapply(t, is_empty)))
+
+names = list()
+names[[1]] = df[[1]]$gene_name
+for(i in 2:ns) {
+  names[[i]] = union(df[[i]]$gene_name, names[[i-1]])
+}
+
+det_prot = as.data.frame(names[[i]])
+colnames(det_prot) = "gene_name"
+
+for (i in 1:ns) {
+  sel = which(det_prot$gene_name %in% df[[i]]$gene_name)
+  det_prot[,i+1] = 0
+  det_prot[,i+1][sel] = 1
+}
+
+colnames(det_prot)[2:(ns+1)] = str_to_title(gsub("_.+", "", files))
+
+det_prot$nstud = apply(det_prot[,2:(ns+1)], 1, sum)
+View(det_prot)
+table(det_prot$nstud)
+#rem = c(which(is.na(det_prot$gene_name)), which(det_prot$gene_name==""))
+#det_prot = det_prot[-rem,]
+
+# If you want to exclude the ones that are uncertain identifications
+# dbm_det_prot = det_prot[grep(";", det_prot$gene_name),]
+# length(grep(";", det_prot$gene_name))/nrow(det_prot)*100
+# det_prot = det_prot[-which(det_prot$gene_name %in% dbm_det_prot$gene_name),]
+
+###### Loop for SMD meta-analysis and plots #####
+setwd("../../results")
+mg.sum = list()
+sume = list()
+sume_calc = list()
+cases = list()
+controls = list()
+nstud = list()
+
+# Change the one you need for the results
+mg.selected = c(2,3,9,15,24,34:37,40,41,52,54:56,59:62,65:71,
+                76:86,119,121:127)
+
+# Select the intersecting proteins
+proteins = det_prot$gene_name[which(det_prot$nstud>1)] # 35 proteins had matched to several genes
+
+for (i in 1:length(proteins)) {
+  prot = proteins[[i]]
+  param = list()
+  eff_size = list()
+  g_eff = list()
+  
+  for (z in 1:ns){
+  x = df[[z]]
+  param[[z]] = x[which(x$gene_name==prot),1:6]
+  names(param)[[z]] = files[[z]]
+  }
+  
+  sume = as.data.frame(do.call(rbind, param))
+  
+    sume$author = gsub("_.+", "", rownames(sume))
+    sume$author = paste(str_to_title(sume$author), "et al.")
+    sume$publication_year = str_extract(rownames(sume), "[0-9]+")
+    
+    sume_calc <- esc_mean_sd(grp1m = sume$mean_covid,
+                       grp1sd = sume$sd_covid,
+                       grp1n = sume$number_covid,
+                       grp2m = sume$mean_healthy,
+                       grp2sd = sume$sd_healthy,
+                       grp2n = sume$number_healthy,
+                       study = sume$author,
+                       es.type = "g") %>% 
+                     as.data.frame()
+    
+    sume_calc$w <- 1/sume_calc$se^2
+    
+    cases[[i]] = sum(sume$number_covid)
+    controls[[i]] = sum(sume$number_healthy)
+    nstud[[i]] = length(sume$author)
+    
+    m.gen <- metagen(TE = es,
+                 seTE = se,
+                 studlab = study,
+                 data = sume_calc,
+                 sm = "SMD",
+                 fixed = FALSE,
+                 random = TRUE,
+                 method.tau = "REML",
+                 #hakn = TRUE,
+                 title = paste("Change in protein:", prot))
+    summary(m.gen)
+    
+    m.gen <- update.meta(m.gen, prediction = TRUE)
+    summary(m.gen)
+    
+    #find.outliers(m.gen)
+    #m.gen.inf <- InfluenceAnalysis(m.gen, random = TRUE)
+    #plot(m.gen.inf, "baujat") # error
+    
+    sume[[i]] = sume
+    sume_calc[[i]] = sume_calc
+    
+    names(m.gen)
+    
+    mg.sum[[i]] = unlist(m.gen[mg.selected]) # Fix this
+    
+    pdf(file = paste("forest_plots/", prot, "_forestplot.pdf", sep=""), width = 8, height = 7)
+    forest.meta(m.gen, 
+            sortvar = TE,
+            prediction=TRUE,
+            print.tau2 = FALSE,
+            leftlabs = c("Author", "n", "g", "SE"))
+    dev.off()
+    
+    print(paste("Run:", i, "done."))
+    print(paste("Protein ", proteins[[i]], " identified in: ", nrow(sume), " studies.", sep=""))
+    
+}
+
+meta_results = as.data.frame(cbind(do.call(rbind, mg.sum), unlist(cases), unlist(controls)))
+rem = c(1, 5, 19, 37)
+meta_results[,-1] = apply(meta_results[,-1], 2, function(x) as.numeric(as.character(x)))
+rownames(meta_results) = proteins
+colnames(meta_results)[46:47] = c("cases", "controls")
+
+meta_results$sum = meta_results$cases+meta_results$controls
+meta_results$gene_name = proteins
+meta_results = meta_results[,c(49:46, 1:45)]
+
+meta_results$random.adj.pval = p.adjust(meta_results$pval.random, method="fdr")
+meta_results$fixed.adj.pval = p.adjust(meta_results$pval.fixed, method="fdr")
+sel = which(meta_results$pval.random<0.05)
+
+meta_sel = meta_results[sel,]
+table(meta_sel$fixed.adj.pval<0.05)
+table(meta_sel$random.adj.pval<0.05)
+table(meta_sel$pval.random<0.05)
+
+#impr = grep(";", meta_sel$gene_name)
+#meta_sel = meta_sel[-impr,]
+
+#impr = grep(";", meta_sel_fix$gene_name)
+#meta_sel_fix = meta_sel_fix[-impr,]
+
+setwd("~/Desktop/covid_hirief/results")
+
+meta_sel = meta_sel[order(meta_sel$TE.random, decreasing = T),]
+meta_sel$order = nrow(meta_sel):1
+
+meta_sel2 = meta_sel[which(meta_sel$k.study>17),]
+# n = nrow(meta_sel2)
+# meta_sel2 = meta_sel2[c(1:20, (n-19):n),]
+
+# meta_sel2 = meta_sel[which(meta_sel$gene_name %in% ress$gene_name),]
+# meta_sel2$cell_fc = ress2$fc[match(meta_sel2$gene_name, ress$gene_name)]
+# meta_sel2$cfcat = ifelse(meta_sel2$cell_fc>0, "Up in COVID-19", "Down in COVID-19")
+
+meta_sel2$cat = ifelse(meta_sel2$TE.random>0, "Up in COVID-19", "Down in COVID-19")
+#table(meta_sel2$cat, meta_sel2$cfcat)
+
+#sel = which(meta_sel2$random.adj.pval<0.05)
+mp = ggplot(meta_sel2, aes(TE.random, as.factor(order), col=cat)) +
+  geom_errorbar(aes(xmin=lower.random, xmax=upper.random)) +
+  geom_point(size=3, shape="diamond") +
+  scale_y_discrete("Proteins (gene name)", labels=rev(meta_sel2$gene_name)) +
+  theme_classic() +
+  geom_vline(xintercept = 0, col="black", linetype="dashed", size=1) +
+  scale_x_continuous("Random effect model: Estimate + 95% CI", breaks=seq(-5.5, 5, 0.5)) +
+  scale_color_manual("Alteration", values=c("#0072B2", "#D55E00")) +
+  theme(legend.position = c(0.8, 0.2))
+mp
+
+ggsave("meta_analysis_sign_all_forest_18plus_studies.pdf", mp, width=9, height=7)
+
+intersect(meta_sel$gene_name, det_prot$gene_name[which(det_prot$nstud==ns)])
+meta_results$gene_name[grep("IGH|IGL|IGK", meta_results$gene_name)]
+
+```
+
+```{r volcano_meta, include=FALSE, echo=FALSE}
+tres = meta_results
+
+tres$alteration = "Up in Covid-19"
+tres$alteration[which(tres$TE.random<0)] = "Down in Covid-19"
+
+tres$shade = abs(tres$TE.random)*-log10(tres$pval.random)
+tres$shadcat = cut(tres$shade, breaks=c(0,0.25, 0.5, 0.75, 1, 1.5, 2.5, 7, 16))
+levels(tres$shadcat) = c(1:8)
+table(is.na(tres$shadcat))
+table(tres$shadcat)
+
+y <- tres[which(tres$shade>2.5 & tres$TE.random>0),]
+r <- tres[which(tres$shade>2.5 & tres$TE.random<0),]
+
+cov = ggplot(tres, aes(x=TE.random, y=-log10(pval.random), col=alteration)) + 
+    geom_point(aes(alpha=as.numeric(shadcat))) + 
+    theme_classic() + 
+    ylab(expression(paste("-log10 ", italic("p"), " values"))) + 
+    xlab("SMD") + 
+    scale_alpha(range=c(0.1,1), guide="none") +
+    geom_hline(yintercept=-log10(0.05), col="red", linetype="dotdash", size=1) + 
+    scale_color_manual("Alteration", values=c("#0072B2", "#D55E00")) +
+    theme(legend.position = c(0.9, 0.9)) +
+    geom_text_repel(data=y, aes(x=TE.random, y=-log10(pval.random), label=gene_name), col="#D55E00", vjust=0.5, hjust=0.1) + 
+    geom_text_repel(data=r, aes(x=TE.random, y=-log10(pval.random), label=gene_name), col="#0072B2", vjust=0.5, hjust=-0.1) + 
+    scale_x_continuous("", breaks=seq(round(min(tres$TE.random)),round(max(tres$TE.random)), 0.5)) +
+    scale_y_continuous("", breaks=seq(round(min(-log10(tres$pval.random), digits=1)), 
+                                  round(max(-log10(tres$pval.random)), digits=1), 1))
+cov
+
+ggsave("volcano_meta_analysis.png", cov, width=6.25, height=5, units="in", dpi=600)
+
+quartz(type = 'pdf', file = 'volcano_meta_analysis.pdf', width=6.25, height=5)
+cov
+dev.off()
+
+```
+
+```{r comparison_to_hirief, include=FALSE, echo=FALSE}
+# Meta-comparison
+tres = read.csv("covid_vs_hc_all_res.csv")
+
+ov = intersect(meta_results$gene_name, tres$gene)
+res = tres
+res = res[which(res$gene %in% ov),]
+res = res[which(res$adj.p<0.05),]
+
+# Change metsign depending on the significance you want
+res$metsign = meta_results$TE.random[match(res$gene, meta_results$gene_name)]
+res$metsign = meta_sel$TE.random[match(res$gene, meta_sel$gene_name)]
+table(is.na(res$metsign))[1]/nrow(res)
+
+res$olcat = NA
+res$olcat[which(res$fc>0 & res$metsign>0)] = paste('\U2191', "HiRIEF-MS,", '\U2191', "Meta-analysis")
+res$olcat[which(res$fc>0 & res$metsign<0)] = paste('\U2191', "HiRIEF-MS,", '\U2193', "Meta-analysis")
+res$olcat[which(res$fc<0 & res$metsign<0)] = paste('\U2193', "HiRIEF-MS,", '\U2193', "Meta-analysis")
+res$olcat[which(res$fc<0 & res$metsign>0)] = paste('\U2193', "HiRIEF-MS,", '\U2191', "Meta-analysis")
+t = table(res$olcat)
+a = sum(t[c(1,2)])/sum(t)*100
+#a = sum(t[c(1,3)])/sum(t)*100 # For plasma
+
+cv = cor(res$fc, res$metsign, use="pairwise.complete.obs", method="spearman")
+
+#sel = which(!is.na(res$metsign))
+#For all colours: "#D55E00", "#E69F00", "#CC79A7", "#009E73"
+
+p = ggplot(res, aes(fc, metsign, col=olcat)) +
+  geom_point() +
+  geom_text_repel(label=res$gene) + 
+  theme_classic() +
+  geom_vline(xintercept = 0, col="darkgray", linetype="dashed", size=0.5) +
+  geom_hline(yintercept = 0, col="darkgray", linetype="dashed", size=0.5) +
+  scale_x_continuous("HiRIEF LC-MS/MS, log2-FC COVID-19:Healthy", breaks=seq(-2,2,0.25)) +
+  scale_y_continuous("Meta-analysis, log2-FC COVID-19:Controls", breaks=seq(-3,3.5,0.5)) +
+  annotate("text", x=-1.5, y=1.5, hjust=0, col="black",
+           label=paste("Agreement: ", round(a, digits=3), "%", sep="")) +
+  annotate("text", x=-1.5, y=1.3, hjust=0, col="black",
+           label=paste("r = ", round(cv, digits=3), sep="")) +
+  scale_color_manual(name="change", values=c("#D55E00", "#009E73")) +
+  #scale_color_manual(name="change", values=c("#D55E00", "#CC79A7", "#009E73")) + # For plasma
+  theme(legend.position = c(0.8, 0.15))
+p
+
+quartz(type = 'pdf', file = 'Meta_analysis_sign_vs_HiRIEF_adjpval_sign.pdf', width=8, height=6)
+p
+dev.off()
+ggsave("Meta_analysis_sign_vs_HiRIEF_adjpval_sign.jpeg", p, dpi=600, width=8, height=6)
+
+write.csv(meta_sel, "meta_sel.csv")
+write.csv(meta_results, "meta_results.csv")
+
+write_rds(df, "study_summaries.RData")
+write.csv(meta_sel, "meta_sel.csv")
+write.csv(meta_results, "meta_results.csv")
+write.csv(det_prot, "detected_proteins.csv")
+
+```
+
+```{r meta_analysis_serum_plasma, include=FALSE}
+
+# Select the studies with serum
+s1$nams = gsub("et al.", "", s1$Author)
+s1$nams = gsub(" ", "", s1$nams)
+
+# Specify here the type of sample you wish to use
+# Choose "Plasma" or "Serum"
+type_sample = "Plasma"
+sel_sample = s1$nams[which(s1$Samples==type_sample)]
+
+# To exclude our study
+#serum_min = sel_sample[-grep("Baba", sel_sample)]
+#sel_sample = serum_min
+
+det_prot_sel = det_prot[,which(colnames(det_prot) %in% c("gene_name", sel_sample))]
+det_prot_sel$nstud = apply(det_prot_sel[,-1], 1, sum)
+table(det_prot_sel$nstud>1)
+
+# Specify here the subset of interest
+sel = which(str_to_title(gsub("_.+", "", names(df))) %in% sel_sample)
+df_sel = df[sel]
+
+# Select the intersecting proteins
+proteins = det_prot_sel$gene_name[which(det_prot_sel$nstud>1)] # 35 proteins had matched to several genes
+
+mg.sum = list()
+sume = list()
+sume_calc = list()
+cases = list()
+controls = list()
+nstud = list()
+
+for (i in 1:length(proteins)) {
+  prot = proteins[[i]]
+  param = list()
+  eff_size = list()
+  g_eff = list()
+  
+  for (z in 1:length(df_sel)){
+  x = df_sel[[z]]
+  param[[z]] = x[which(x$gene_name==prot),1:6]
+  names(param)[[z]] = files[sel][[z]]
+  }
+  
+  sume = as.data.frame(do.call(rbind, param))
+  
+    sume$author = gsub("_.+", "", rownames(sume))
+    sume$author = paste(str_to_title(sume$author), "et al.")
+    sume$publication_year = str_extract(rownames(sume), "[0-9]+")
+    
+    sume_calc <- esc_mean_sd(grp1m = sume$mean_covid,
+                       grp1sd = sume$sd_covid,
+                       grp1n = sume$number_covid,
+                       grp2m = sume$mean_healthy,
+                       grp2sd = sume$sd_healthy,
+                       grp2n = sume$number_healthy,
+                       study = sume$author,
+                       es.type = "g") %>% 
+                     as.data.frame()
+    
+    sume_calc$w <- 1/sume_calc$se^2
+    
+    cases[[i]] = sum(sume$number_covid)
+    controls[[i]] = sum(sume$number_healthy)
+    nstud[[i]] = length(sume$author)
+    
+    m.gen <- metagen(TE = es,
+                 seTE = se,
+                 studlab = study,
+                 data = sume_calc,
+                 sm = "SMD",
+                 fixed = FALSE,
+                 random = TRUE,
+                 method.tau = "REML",
+                 #hakn = TRUE,
+                 title = paste("Change in protein:", prot))
+    summary(m.gen)
+    
+    m.gen <- update.meta(m.gen, prediction = TRUE)
+    summary(m.gen)
+    
+    #find.outliers(m.gen)
+    #m.gen.inf <- InfluenceAnalysis(m.gen, random = TRUE)
+    #plot(m.gen.inf, "baujat") # error
+    
+    sume[[i]] = sume
+    sume_calc[[i]] = sume_calc
+    
+    names(m.gen)
+    
+    mg.sum[[i]] = unlist(m.gen[mg.selected]) # Fix this
+    
+    pdf(file = paste("forest_plots/A1_stratified/", type_sample, "_", prot, "_forestplot.pdf", sep=""), width = 8, height = 7)
+    forest.meta(m.gen, 
+            sortvar = TE,
+            prediction=TRUE,
+            print.tau2 = FALSE,
+            leftlabs = c("Author", "n", "g", "SE"))
+    dev.off()
+    
+    print(paste("Run:", i, "done."))
+    print(paste("Protein ", proteins[[i]], " identified in: ", nrow(sume), " studies.", sep=""))
+    
+}
+
+meta_results = as.data.frame(cbind(do.call(rbind, mg.sum), unlist(cases), unlist(controls)))
+rem = c(1, 5, 19, 37)
+meta_results[,-1] = apply(meta_results[,-1], 2, function(x) as.numeric(as.character(x)))
+rownames(meta_results) = proteins
+colnames(meta_results)[46:47] = c("cases", "controls")
+
+meta_results$sum = meta_results$cases+meta_results$controls
+meta_results$gene_name = proteins
+meta_results = meta_results[,c(49:46, 1:45)]
+
+meta_results$random.adj.pval = p.adjust(meta_results$pval.random, method="fdr")
+meta_results$fixed.adj.pval = p.adjust(meta_results$pval.fixed, method="fdr")
+sel = which(meta_results$pval.random<0.05)
+
+meta_sel = meta_results[sel,]
+table(meta_sel$fixed.adj.pval<0.05)
+table(meta_sel$random.adj.pval<0.05)
+table(meta_sel$pval.random<0.05)
+
+meta_sel = meta_sel[order(meta_sel$TE.random, decreasing = T),]
+meta_sel$order = nrow(meta_sel):1
+
+write.csv(meta_results, paste0("meta_results_", type_sample, ".csv"))
+write.csv(meta_sel, paste0("meta_sel_",type_sample, ".csv"))
+
+meta_sel2 = meta_sel[which(meta_sel$k.study>7),]
+meta_sel2$cat = ifelse(meta_sel2$TE.random>0, "Up in COVID-19", "Down in COVID-19")
+
+mp = ggplot(meta_sel2, aes(TE.random, as.factor(order), col=cat)) +
+  geom_errorbar(aes(xmin=lower.random, xmax=upper.random)) +
+  geom_point(size=3, shape="diamond") +
+  scale_y_discrete("Proteins (gene name)", labels=rev(meta_sel2$gene_name)) +
+  theme_classic() +
+  geom_vline(xintercept = 0, col="black", linetype="dashed", size=1) +
+  scale_x_continuous("Random effect model: Estimate + 95% CI", breaks=seq(-5.5, 5, 0.5)) +
+  scale_color_manual("Alteration", values=c("#0072B2", "#D55E00")) +
+  theme(legend.position = c(0.8, 0.2))
+mp
+
+ggsave(paste0("meta_analysis_sign_all_forest_", type_sample, "6+_studies.pdf"), mp, width=9, height=7)
+
+```
+
+```{r volcano_meta_serum_palsma, include=FALSE, echo=FALSE}
+tres = read.csv(paste0("meta_results_", type_sample, ".csv"))
+tres$alteration = "Up in Covid-19"
+tres$alteration[which(tres$TE.random<0)] = "Down in Covid-19"
+
+tres$shade = abs(tres$TE.random)*-log10(tres$pval.random)
+tres$shadcat = cut(tres$shade, breaks=c(0,0.25, 0.5, 0.75, 1, 1.5, 2.5, 7, 16))
+levels(tres$shadcat) = c(1:8)
+table(is.na(tres$shadcat))
+table(tres$shadcat)
+
+y <- tres[which(tres$shade>2.5 & tres$TE.random>0),]
+r <- tres[which(tres$shade>2.5 & tres$TE.random<0),]
+
+cov = ggplot(tres, aes(x=TE.random, y=-log10(pval.random), col=alteration)) + 
+    geom_point(aes(alpha=as.numeric(shadcat))) + 
+    theme_classic() + 
+    ylab(expression(paste("-log10 ", italic("p"), " values"))) + 
+    xlab("SMD") + 
+    scale_alpha(range=c(0.1,1), guide="none") +
+    geom_hline(yintercept=-log10(0.05), col="red", linetype="dotdash", size=1) + 
+    scale_color_manual("Alteration", values=c("#0072B2", "#D55E00")) +
+    theme(legend.position = c(0.9, 0.9)) +
+    geom_text_repel(data=y, aes(x=TE.random, y=-log10(pval.random), label=gene_name), col="#D55E00", vjust=0.5, hjust=0.1) + 
+    geom_text_repel(data=r, aes(x=TE.random, y=-log10(pval.random), label=gene_name), col="#0072B2", vjust=0.5, hjust=-0.1) + 
+    scale_x_continuous("", breaks=seq(round(min(tres$TE.random)),round(max(tres$TE.random)), 0.5)) +
+    scale_y_continuous("", breaks=seq(round(min(-log10(tres$pval.random), digits=1)), 
+                                  round(max(-log10(tres$pval.random)), digits=1), 1))
+cov
+
+ggsave(paste0("volcano_meta_analysis", type_sample, ".png"), cov, width=6.25, height=5, units="in", dpi=600)
+
+quartz(type = 'pdf', file = paste0("volcano_meta_analysis", type_sample, ".pdf"), width=6.25, height=5)
+cov
+dev.off()
+
+```
+
+```{r comparison_to_hirief_serum_plasma, include=FALSE, echo=FALSE}
+# Meta-comparison
+tres = read.csv("covid_vs_hc_all_res.csv")
+meta_results = read.csv(paste0("meta_results_", type_sample, ".csv"))
+
+ov = intersect(meta_results$gene_name, tres$gene)
+res = tres
+res = res[which(res$gene %in% ov),]
+res = res[which(res$adj.p<0.05),]
+
+# Change metsign depending on the significance you want
+res$metsign = meta_results$TE.random[match(res$gene, meta_results$gene_name)]
+res$metsign = meta_sel$TE.random[match(res$gene, meta_sel$gene_name)]
+table(is.na(res$metsign))[1]/nrow(res)
+
+res$olcat = NA
+res$olcat[which(res$fc>0 & res$metsign>0)] = paste('\U2191', "HiRIEF-MS,", '\U2191', "Meta-analysis")
+res$olcat[which(res$fc>0 & res$metsign<0)] = paste('\U2191', "HiRIEF-MS,", '\U2193', "Meta-analysis")
+res$olcat[which(res$fc<0 & res$metsign<0)] = paste('\U2193', "HiRIEF-MS,", '\U2193', "Meta-analysis")
+res$olcat[which(res$fc<0 & res$metsign>0)] = paste('\U2193', "HiRIEF-MS,", '\U2191', "Meta-analysis")
+t = table(res$olcat)
+a = sum(t[c(1,2)])/sum(t)*100
+#a = sum(t[c(1,3)])/sum(t)*100 # For plasma
+
+cv = cor(res$fc, res$metsign, use="pairwise.complete.obs", method="spearman")
+
+#sel = which(!is.na(res$metsign))
+#For all colours: "#D55E00", "#E69F00", "#CC79A7", "#009E73"
+
+p = ggplot(res, aes(fc, metsign, col=olcat)) +
+  geom_point() +
+  geom_text_repel(label=res$gene) + 
+  theme_classic() +
+  geom_vline(xintercept = 0, col="darkgray", linetype="dashed", size=0.5) +
+  geom_hline(yintercept = 0, col="darkgray", linetype="dashed", size=0.5) +
+  scale_x_continuous("HiRIEF LC-MS/MS, log2-FC COVID-19:Healthy", breaks=seq(-2,2,0.25)) +
+  scale_y_continuous("Meta-analysis, log2-FC COVID-19:Controls", breaks=seq(-3,3.5,0.5)) +
+  annotate("text", x=-1.5, y=1.5, hjust=0, col="black",
+           label=paste("Agreement: ", round(a, digits=3), "%", sep="")) +
+  annotate("text", x=-1.5, y=1.3, hjust=0, col="black",
+           label=paste("r = ", round(cv, digits=3), sep="")) +
+  scale_color_manual(name="change", values=c("#D55E00", "#009E73")) +
+  #scale_color_manual(name="change", values=c("#D55E00", "#CC79A7", "#009E73")) + # For plasma
+  theme(legend.position = c(0.8, 0.15))
+p
+
+quartz(type = 'pdf', 
+       file = paste0('Meta_analysis_sign_vs_HiRIEF_adjpval_sign', type_sample, ".pdf"), 
+       width=8, height=6)
+p
+dev.off()
+ggsave(paste0('Meta_analysis_sign_vs_HiRIEF_adjpval_sign', type_sample, ".jpeg"), p, dpi=600, width=8, height=6)
+
+```
