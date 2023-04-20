@@ -1,7 +1,7 @@
 
 ############## Function for meta-analysis plot
 mres_f = function(mts, range, nstuds, protcomp) {
-  if (protcomp == "All") {
+  if (any(protcomp == "All")) {
     nstuds = as.numeric(as.character(nstuds))
     sel1 = which(mts$I2<range/100)
     sel2 = which(mts$k.study>=nstuds)

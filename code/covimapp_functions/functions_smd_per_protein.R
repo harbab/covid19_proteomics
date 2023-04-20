@@ -13,13 +13,13 @@ forest_f = function(protein, study, ms) {
   
   sume = as.data.frame(do.call(rbind, param))
   
-  sume$author = gsub("_.+", "", rownames(sume))
-  sume$publication_year = str_extract(rownames(sume), "[0-9]+")
+  sume$author = rownames(sume)
+  sume$publication_year = t2$Year[match(sume$author, t2$Author)]
   
-  if (study!="None") {
-    if(study %in% c("Plasma", "Serum")) {
+  if (any(study!="None")) {
+    if(any(study %in% c("Plasma", "Plasma and serum", "Serum"))) {
       nam1 = sume$author
-      nam2 = t1$Author[which(t1$Samples==study)]
+      nam2 = t2$Author[which(t2$Samples==study)]
       rem = which(nam1 %in% nam2)
       sume = sume[-rem,]
     } else {
@@ -30,7 +30,7 @@ forest_f = function(protein, study, ms) {
   
   if (ms!="None") {
     nam1 = sume$author
-    nam2 = t2$Author[which(t2$`Type of MS acquisition`==ms)]
+    nam2 = t2$Author[which(t2$Type.of.MS.acquisition==ms)]
     rem = which(nam1 %in% nam2)
     sume = sume[-rem,]
   }
@@ -67,8 +67,8 @@ forest_f = function(protein, study, ms) {
 }
 
 
-############## Function for forest plots
-mgen_f = function(protein) {
+############## Function for tables of the estimates
+mgen_f = function(protein, study, ms) {
   param = list()
   eff_size = list()
   g_eff = list()
@@ -81,8 +81,27 @@ mgen_f = function(protein) {
   
   sume = as.data.frame(do.call(rbind, param))
   
-  sume$author = gsub("_.+", "", rownames(sume))
-  sume$publication_year = str_extract(rownames(sume), "[0-9]+")
+  sume$author = rownames(sume)
+  sume$publication_year = t2$Year[match(sume$author, t2$Author)]
+  
+  if (any(study!="None")) {
+    if(any(study %in% c("Plasma", "Plasma and serum", "Serum"))) {
+      nam1 = sume$author
+      nam2 = t2$Author[which(t2$Samples==study)]
+      rem = which(nam1 %in% nam2)
+      sume = sume[-rem,]
+    } else {
+      rem = which(sume$author %in% study)
+      sume = sume[-rem,]
+    }
+  }
+  
+  if (ms!="None") {
+    nam1 = sume$author
+    nam2 = t2$Author[which(t2$Type.of.MS.acquisition==ms)]
+    rem = which(nam1 %in% nam2)
+    sume = sume[-rem,]
+  }
   
   sume_calc <- esc_mean_sd(grp1m = sume$mean_covid,
                            grp1sd = sume$sd_covid,
@@ -105,13 +124,18 @@ mgen_f = function(protein) {
                    #hakn = TRUE,
                    title = paste("Change in protein:", protein))
   
-  tbl = do.call(cbind, m.gen[c(1:8,10,11)])
+  sel = c("studlab", "TE", "seTE", "lower", "upper", "statistic", "pval", "zval", "w.fixed", "w.random")
+  tbl = do.call(cbind, m.gen[sel])
   
-  f = c("Summary estimate - fixed effect", unlist(m.gen[c(13:19)]), "", "")
-  r = c("Summary estimate - random effect", unlist(m.gen[c(20:26)]), "", "")
+  sel1 = c("TE.fixed", "seTE.fixed", "lower.fixed", "upper.fixed",
+           "statistic.fixed", "pval.fixed", "zval.fixed")
+  sel2 = c("TE.random", "seTE.random", "lower.random", "upper.random",
+           "statistic.random", "pval.random", "zval.random")
+  f = c("Summary estimate - fixed effect", unlist(m.gen[sel1]), "NA", "NA")
+  r = c("Summary estimate - random effect", unlist(m.gen[sel2]), "NA", "NA")
   tbl2 = as.data.frame(rbind(tbl, f, r))
   
-  tbl2[,-1] = apply(tbl2[,-1], 2, as.numeric)
+  tbl2[,-c(1,9,10)] = apply(tbl2[,-c(1,9,10)], 2, as.numeric)
   
   tbl2
   
@@ -131,13 +155,13 @@ funnel_f = function(protein, study, ms) {
   
   sume = as.data.frame(do.call(rbind, param))
   
-  sume$author = gsub("_.+", "", rownames(sume))
-  sume$publication_year = str_extract(rownames(sume), "[0-9]+")
+  sume$author = rownames(sume)
+  sume$publication_year = t2$Year[match(sume$author, t2$Author)]
   
-  if (study!="None") {
-    if(study %in% c("Plasma", "Serum")) {
+  if (any(study!="None")) {
+    if(any(study %in% c("Plasma", "Plasma and serum", "Serum"))) {
       nam1 = sume$author
-      nam2 = t1$Author[which(t1$Samples==study)]
+      nam2 = t2$Author[which(t2$Samples==study)]
       rem = which(nam1 %in% nam2)
       sume = sume[-rem,]
     } else {
@@ -148,7 +172,7 @@ funnel_f = function(protein, study, ms) {
   
   if (ms!="None") {
     nam1 = sume$author
-    nam2 = t2$Author[which(t2$`Type of MS acquisition`==ms)]
+    nam2 = t2$Author[which(t2$Type.of.MS.acquisition==ms)]
     rem = which(nam1 %in% nam2)
     sume = sume[-rem,]
   }
@@ -205,7 +229,7 @@ sume_f = function(protein) {
   sume = as.data.frame(do.call(rbind, param))
   
   sume$author = rownames(sume)
-  sume$publication_year = t1$Year[match(sume$author, t1$Author)]
+  sume$publication_year = t2$Year[match(sume$author, t2$Author)]
   
   tbl = sume[,c(7,8,1:6)]
   tbl$nsum = tbl$number_covid+tbl$number_healthy

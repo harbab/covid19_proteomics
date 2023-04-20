@@ -393,8 +393,6 @@ for(i in selprot) {
 ```
 
 ```{r sroc_summary_plots, include=FALSE}
-setwd("../../")
-
 ##### Summary plots #####
 bivglm_res = cbind(do.call(rbind, lapply(tabs, function(x) c(x[1,1:3], x[2,]))), 
                                  do.call(rbind, lapply(sum.pts, function(x) c(x[1,], x[2,], x[4,]))),
